@@ -1,0 +1,18 @@
+{
+  "name": "omarchy-gentle-dot",
+  "private": true,
+  "type": "module",
+  "description": "Native Omarchy plugin for Gentle Dot",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "optionalDependencies": {
+    "sherpa-onnx-node": "2.0.1"
+  },
+  "devDependencies": {
+    "ws": "8.22.0"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy-gentle-dot",
+  "name": "Gentle Dot",
+  "version": "0.2.0",
+  "author": "kattsushi",
+  "license": "MIT",
+  "homepage": "https://github.com/kattsushi/omarchy-gentle-dot",
+  "repository": "https://github.com/kattsushi/omarchy-gentle-dot",
+  "description": "Native Omarchy bar panel for Gentle Dot: chat with a local or remote Gentle Dot daemon, no WebKit.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "Client.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Gentle Dot",
+    "description": "One bar dot showing the assistant's state and a native chat panel for the Gentle Dot daemon.",
+    "category": "AI",
+    "aliases": ["gentle-dot", "gentle"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "serverUrl": "ws://127.0.0.1:4317/ws",
+      "tokenFile": "~/.gentle-dot/token",
+      "nodePath": "node",
+      "notifications": true,
+      "notificationSound": true,
+      "voiceSendOnStop": false,
+      "panelOpacity": 0.95,
+      "avatarSleepMinutes": 30
+    },
+    "schema": [
+      { "key": "notifications", "type": "boolean", "label": "Desktop notifications", "defaultValue": true, "description": "Notify about replies, asks and connection outages while the panel is hidden." },
+      { "key": "notificationSound", "type": "boolean", "label": "Notification sound", "defaultValue": true, "description": "Play a system sound with each notification, except during Do Not Disturb." },
+      { "key": "voiceSendOnStop", "type": "boolean", "label": "Send dictation when I stop", "defaultValue": false, "description": "Send the transcript as soon as recording stops instead of placing it in the composer." },
+      { "key": "panelOpacity", "type": "number", "label": "Panel opacity", "min": 0.5, "max": 1, "step": 0.05, "defaultValue": 0.95, "description": "Background opacity of the chat panel and its detached window; text stays opaque." },
+      { "key": "avatarSleepMinutes", "type": "number", "label": "Avatar sleeps after (minutes)", "min": 0, "max": 1440, "step": 5, "defaultValue": 30, "description": "The avatar falls asleep after this many minutes without activity; any activity wakes it. 0 keeps it awake." },
+      { "key": "serverUrl", "type": "string", "label": "Server URL", "defaultValue": "ws://127.0.0.1:4317/ws", "description": "WebSocket URL of the Gentle Dot daemon. Use wss://host/ws for a remote daemon." },
+      { "key": "tokenFile", "type": "path", "label": "Token file", "defaultValue": "~/.gentle-dot/token", "description": "The token is read from this file on every connect, never stored in shell.json." },
+      { "key": "nodePath", "type": "string", "label": "Node executable", "defaultValue": "node", "description": "Node.js 22 or newer, used to run the bundled WebSocket bridge." }
+    ]
+  }
+}
