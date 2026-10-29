@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 test('activity lists always show actions, select source icons and color rails, and follow status', async t => {
   await qml(t, `
@@ -96,11 +96,21 @@ test('code Copy writes the exact raw code to a clipboard process, not rich HTML'
     }
     return null
   }
-  Timer { interval: 100; running: true; onTriggered: action(code, "codeCopy").clicked() }
-  Timer { interval: 500; running: true; onTriggered: {
-    if (code.copyState !== "Copied") { console.log("QML_FAIL",code.copyState); Qt.exit(1) }
-    else { console.log("QML_PASS"); Qt.quit() }
-  }}
+  TestCase {
+    id: checks; when: false
+    ${poll}
+    function run() {
+      try {
+        action(code, "codeCopy").clicked()
+        // The clipboard command is a Node process: done when it exits, however long that takes.
+        until(function() { return code.copyState !== "Copy" }, 10000, "the clipboard command finishes")
+        check(code.copyState === "Copied", code.copyState)
+        console.log("QML_PASS")
+      } catch (e) { console.log("QML_FAIL", String(e)) }
+      Qt.quit()
+    }
+  }
+  Timer { interval: 100; running: true; onTriggered: checks.run() }
   `, {files:{clipboard:`#!/usr/bin/env node
 let input = ''; process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => input += chunk);

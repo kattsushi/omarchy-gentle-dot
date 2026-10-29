@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 const helpers = `
   function named(item, name) {
@@ -11,6 +11,12 @@ const helpers = `
   }
   function insideEye(eye, pupil) {
     return Math.pow((pupil.x - eye.cx) / (eye.rx - pupil.r), 2) + Math.pow((pupil.y - eye.cy) / (eye.ry - pupil.r), 2) <= 1.001
+  }
+  ${poll}
+  // A gesture's shape is checked while that gesture runs, whenever the clock gets there.
+  function during(name, condition, message) {
+    until(function() { return condition() || avatar.gesture !== name }, 10000, message)
+    if (!condition()) throw Error(message + " (during " + name + ")")
   }`;
 
 test('avatar: a square left of the field that follows its height, 1 line to 8 lines, actions intact', async t => {
@@ -24,15 +30,21 @@ test('avatar: a square left of the field that follows its height, 1 line to 8 li
     name: "AvatarSize"
     when: false
     ${helpers}
-    function settle() { wait(450) }
+    // The field and the avatar animate to their new size: checks hold once they have settled.
+    function square(what) {
+      var avatar = composer.avatar
+      if (avatar.width !== composer.fieldHeight || avatar.height !== composer.fieldHeight)
+        throw Error(what + ": avatar " + avatar.width + "x" + avatar.height + ", field " + composer.fieldHeight)
+    }
     function run() {
       try {
-        settle()
         var avatar = composer.avatar
-        var one = composer.fieldHeight
-        verify(one > 0)
-        compare(avatar.width, one)
-        compare(avatar.height, one)
+        var one = 0
+        settle(function() {
+          one = composer.fieldHeight
+          check(one > 0, "field height")
+          square("one line")
+        })
         compare(avatar.x, 0)
         compare(avatar.y + avatar.height, composer.height)
         compare(composer.width, 420)
@@ -44,22 +56,22 @@ test('avatar: a square left of the field that follows its height, 1 line to 8 li
         verify(editorAt.x >= avatar.width, "text starts right of the avatar")
 
         client.draft = Array(20).fill("wrapped words").join("\\n")
-        settle()
-        var many = composer.fieldHeight
-        verify(many > one * 4, "grows with the text: " + many + " vs " + one)
+        var many = 0
+        settle(function() {
+          many = composer.fieldHeight
+          check(many > one * 4, "grows with the text: " + many + " vs " + one)
+          square("eight lines")
+        })
         verify(composer.implicitHeight <= composer.maximumHeight)
-        compare(avatar.height, many)
-        compare(avatar.width, many)
         compare(composer.width, 420)
 
         // A wrapping paragraph: the narrower field and the taller avatar settle together.
         client.draft = Array(30).fill("words").join(" ")
-        settle()
-        compare(avatar.height, composer.fieldHeight)
-        compare(avatar.width, composer.fieldHeight)
+        wait(450)
+        settle(function() { square("wrapping paragraph") })
 
         client.draft = ""
-        settle()
+        settle(function() { check(composer.fieldHeight === one, "back to one line: " + composer.fieldHeight); square("empty") })
         compare(avatar.height, one)
         console.log("QML_PASS")
       } catch (e) { console.log("QML_FAIL: " + e) }
@@ -99,30 +111,27 @@ test('avatar: pupils follow the pointer over the panel, stay inside the eyes and
           verify(insideEye(avatar.leftEye, avatar.leftPupil), "left inside for " + points[i])
           verify(insideEye(avatar.rightEye, avatar.rightPupil), "right inside for " + points[i])
         }
+        // The gaze eases towards the pointer: checks hold once it got there.
         avatar.pointAt(-5000, 60)
-        wait(400)
         verify(avatar.following)
-        verify(avatar.leftPupil.x < avatar.leftEye.cx - 2, "looks left")
-        verify(avatar.rightPupil.x < avatar.rightEye.cx - 2, "looks left")
+        until(function() { return avatar.leftPupil.x < avatar.leftEye.cx - 2 }, 5000, "looks left")
+        until(function() { return avatar.rightPupil.x < avatar.rightEye.cx - 2 }, 5000, "looks left")
         avatar.pointAt(5000, 60)
-        wait(400)
-        verify(avatar.leftPupil.x > avatar.leftEye.cx + 2, "looks right")
+        until(function() { return avatar.leftPupil.x > avatar.leftEye.cx + 2 }, 5000, "looks right")
 
         // The pointer leaves the panel: the eyes ease back to the mood's own gaze.
         avatar.pointerLeft()
         verify(!avatar.following, "stops following outside the panel")
-        wait(500)
         var home = avatar.gazeFrom(avatar.leftEye.cx, avatar.leftEye.cy)
         compare(home.x, rest.x)
         compare(home.y, rest.y)
-        verify(Math.abs(avatar.leftGx - rest.x) < 0.01 && Math.abs(avatar.leftGy - rest.y) < 0.01, "left gaze back: " + avatar.leftGx + "," + avatar.leftGy)
-        verify(Math.abs(avatar.rightGx - rest.x) < 0.01 && Math.abs(avatar.rightGy - rest.y) < 0.01, "right gaze back")
-        verify(Math.abs(avatar.leftPupil.x - avatar.leftEye.cx) < 0.5, "left pupil centred again")
+        until(function() { return Math.abs(avatar.leftGx - rest.x) < 0.01 && Math.abs(avatar.leftGy - rest.y) < 0.01 }, 5000, "left gaze back")
+        until(function() { return Math.abs(avatar.rightGx - rest.x) < 0.01 && Math.abs(avatar.rightGy - rest.y) < 0.01 }, 5000, "right gaze back")
+        until(function() { return Math.abs(avatar.leftPupil.x - avatar.leftEye.cx) < 0.5 }, 5000, "left pupil centred again")
         // Back over the panel: it follows again.
         avatar.pointAt(-5000, 60)
-        wait(400)
         verify(avatar.following)
-        verify(avatar.leftPupil.x < avatar.leftEye.cx - 2, "follows again")
+        until(function() { return avatar.leftPupil.x < avatar.leftEye.cx - 2 }, 5000, "follows again")
 
         // Nothing asks the compositor for the cursor: no process, no command, no poller.
         var objects = owned(avatar, [])
@@ -165,10 +174,13 @@ test('avatar: slow loops step at most 30 times a second; a breath moves the eyes
     property int gestureSteps: 0
     property real peak: 0
     property real highest: 1000
+    property real gestureEnd: 0
     Connections {
       target: avatar
       function onBreathChanged() { checks.breathSteps++; checks.peak = Math.max(checks.peak, avatar.breath) }
       function onGestureTimeChanged() { checks.gestureSteps++ }
+      // When the gesture ends, taken as it happens (polling would see it late under load).
+      function onGesturingChanged() { if (!avatar.gesturing) checks.gestureEnd = Date.now() }
     }
     function run() {
       try {
@@ -195,12 +207,13 @@ test('avatar: slow loops step at most 30 times a second; a breath moves the eyes
 
         // A moustache gesture: at most 30 steps a second, same keyframes.
         gestureSteps = 0
+        gestureEnd = 0
         avatar.playGesture("grandTwirl")
         var start = Date.now()
-        wait(350)
+        until(function() { return !avatar.gesturing || (avatar.leftMoustache.curl > 0.8 && avatar.rightMoustache.curl > 0.8) }, 5000)
         verify(avatar.leftMoustache.curl > 0.8 && avatar.rightMoustache.curl > 0.8, "both tips twirled")
-        tryVerify(function() { return !avatar.gesturing }, 2500)
-        var seconds = (Date.now() - start) / 1000
+        until(function() { return !avatar.gesturing }, 10000, "the gesture ends")
+        var seconds = (gestureEnd - start) / 1000
         verify(gestureSteps <= seconds * 30 + 2, "gesture steps: " + gestureSteps + " in " + seconds + " s")
         verify(gestureSteps >= seconds * 15, "still smooth: " + gestureSteps)
         compare(avatar.gestureNow.rc, 0, "settled")
@@ -233,6 +246,7 @@ test('avatar: typing in the composer makes it glance and nod, then it rests afte
     id: checks
     name: "AvatarTyping"
     when: false
+    ${helpers}
     function run() {
       try {
         var avatar = composer.avatar
@@ -258,8 +272,7 @@ test('avatar: typing in the composer makes it glance and nod, then it rests afte
         var expected = Math.floor((Date.now() - started) / 250)
         verify(avatar.nods >= expected, "keeps nodding while typing fast: " + avatar.nods + " in " + (Date.now() - started) + " ms")
         verify(avatar.typing)
-        wait(700)
-        verify(!avatar.typing, "rests after the pause")
+        until(function() { return !avatar.typing }, 5000, "rests after the pause")
         compare(avatar.mood, "idle")
         console.log("QML_PASS")
       } catch (e) { console.log("QML_FAIL: " + e) }
@@ -282,6 +295,8 @@ test('avatar: a click plays a happy reaction (three variants) and gives the focu
     id: checks
     name: "AvatarClick"
     when: false
+    readonly property var avatar: composer.avatar
+    ${helpers}
     function run() {
       try {
         var avatar = composer.avatar
@@ -295,21 +310,17 @@ test('avatar: a click plays a happy reaction (three variants) and gives the focu
         compare(avatar.clickVariant, 0)
         compare(avatar.gesture, "grandTwirl")
         verify(composer.editor.activeFocus, "focus returns to the composer")
-        wait(350)
-        verify(avatar.leftMoustache.curl > 0.8 && avatar.rightMoustache.curl > 0.8, "both tips twirled")
+        during("grandTwirl", function() { return avatar.leftMoustache.curl > 0.8 && avatar.rightMoustache.curl > 0.8 }, "both tips twirled")
         mouseClick(avatar)
         compare(avatar.clickVariant, 1)
         compare(avatar.gesture, "shimmy")
-        wait(70)
-        verify(Math.abs(avatar.gestureNow.sway) > 1, "shimmies sideways")
+        during("shimmy", function() { return Math.abs(avatar.gestureNow.sway) > 1 }, "shimmies sideways")
         mouseClick(avatar)
         compare(avatar.clickVariant, 2)
         compare(avatar.gesture, "cheeky")
-        wait(300)
-        verify(Math.abs(avatar.leftMoustache.raise - avatar.rightMoustache.raise) > 0.8, "one tip up, the other down")
+        during("cheeky", function() { return Math.abs(avatar.leftMoustache.raise - avatar.rightMoustache.raise) > 0.8 }, "one tip up, the other down")
         verify(composer.editor.activeFocus)
-        wait(1400)
-        compare(avatar.reaction, "")
+        until(function() { return avatar.reaction === "" }, 5000, "the reaction ends")
         compare(avatar.mood, "idle")
         console.log("QML_PASS")
       } catch (e) { console.log("QML_FAIL: " + e) }
@@ -335,6 +346,7 @@ test('avatar: the mood follows the shared service with no daemon traffic', async
     id: checks
     name: "AvatarMood"
     when: false
+    ${helpers}
     function run() {
       try {
         compare(avatar.mood, "sleepy")
@@ -353,7 +365,7 @@ test('avatar: the mood follows the shared service with no daemon traffic', async
         client.agentState = "working"
         client.handleLine(JSON.stringify({type: "message_done", messageId: "m1", text: "Hi"}))
         compare(avatar.mood, "surprised", "a reply landed while visible")
-        wait(1100)
+        until(function() { return avatar.mood !== "surprised" }, 5000, "the surprise ends")
         compare(avatar.mood, "focused")
         client.agentState = "idle"
         client.voice.state = "recording"
@@ -396,29 +408,27 @@ test('avatar: each mood starts its moustache gesture', async t => {
     id: checks
     name: "AvatarGestures"
     when: false
+    ${helpers}
     function curled() { return Math.max(avatar.leftMoustache.curl, avatar.rightMoustache.curl) }
     function run() {
       try {
         // Idle: a proud twirl after a random 10-20 s (scaled down here).
         compare(avatar.mood, "idle")
         verify(avatar.gestureScheduled)
-        tryCompare(avatar, "gesture", "proud", 1000)
-        wait(950)
-        verify(curled() > 0.8, "a tip twirled: " + curled())
+        until(function() { return avatar.gesture === "proud" }, 5000, "proud twirl")
+        during("proud", function() { return curled() > 0.8 }, "a tip twirled")
 
         // Thinking: one tip twirls slowly, over and over.
         client.agentState = "thinking"
         compare(avatar.gesture, "hmm")
         var count = avatar.gestureCount
-        wait(1150)
-        verify(curled() > 0.7, "hmm twirl: " + curled())
-        verify(Math.min(avatar.leftMoustache.curl, avatar.rightMoustache.curl) < curled() - 0.5, "only one tip")
-        tryVerify(function() { return avatar.gestureCount > count && avatar.gesture === "hmm" }, 3000, "hmm loops")
+        during("hmm", function() { return curled() > 0.7 && Math.min(avatar.leftMoustache.curl, avatar.rightMoustache.curl) < curled() - 0.5 }, "hmm twirls only one tip")
+        until(function() { return avatar.gestureCount > count && avatar.gesture === "hmm" }, 10000, "hmm loops")
 
         // Working: a determined twitch every now and then.
         client.agentState = "working"
         verify(avatar.gestureScheduled)
-        tryCompare(avatar, "lastGesture", "twitch", 1000)
+        until(function() { return avatar.lastGesture === "twitch" }, 5000, "a twitch")
 
         // Streaming: talks, the lip moving irregularly.
         client.handleLine(JSON.stringify({type: "message_delta", messageId: "m1", delta: "Ciao"}))
@@ -443,23 +453,20 @@ test('avatar: each mood starts its moustache gesture', async t => {
         client.handleLine(JSON.stringify({type: "message_done", messageId: "m1", text: "Ciao bella"}))
         compare(avatar.mood, "surprised")
         compare(avatar.gesture, "listo")
-        wait(600)
-        verify(avatar.leftMoustache.curl > 0.7 && avatar.rightMoustache.curl > 0.7, "listo curls both tips")
+        during("listo", function() { return avatar.leftMoustache.curl > 0.7 && avatar.rightMoustache.curl > 0.7 }, "listo curls both tips")
         wait(1000)
 
         // Needs you: a cheeky one-side raise.
         client.agentState = "needs_you"
         compare(avatar.mood, "alert")
         compare(avatar.gesture, "cheeky")
-        wait(250)
-        verify(Math.abs(avatar.leftMoustache.raise - avatar.rightMoustache.raise) > 0.8, "cheeky")
+        during("cheeky", function() { return Math.abs(avatar.leftMoustache.raise - avatar.rightMoustache.raise) > 0.8 }, "cheeky")
 
         // A toast: surprise, the moustache puffs out.
         client.handleLine(JSON.stringify({type: "toast", message: "Heads up", level: "info"}))
         compare(avatar.mood, "surprised")
         compare(avatar.gesture, "puff")
-        wait(110)
-        verify(avatar.rightMoustache.puff > 0.6, "puffed: " + avatar.rightMoustache.puff)
+        during("puff", function() { return avatar.rightMoustache.puff > 0.6 }, "puffed")
         wait(1000)
 
         // An error: a dramatic droop. Mamma mia.
@@ -467,24 +474,21 @@ test('avatar: each mood starts its moustache gesture', async t => {
         client.handleLine(JSON.stringify({type: "message_done", messageId: "m2", text: "", error: "boom"}))
         compare(avatar.mood, "worried")
         compare(avatar.gesture, "mammamia")
-        wait(550)
-        verify(avatar.rightMoustache.raise < -1.4 && avatar.leftMoustache.raise < -1.4, "dramatic droop: " + avatar.rightMoustache.raise)
+        during("mammamia", function() { return avatar.rightMoustache.raise < -1.4 && avatar.leftMoustache.raise < -1.4 }, "dramatic droop")
         avatar.replyFailed = false
 
         // Recording: attentive, tips up.
         client.voice.state = "recording"
         compare(avatar.mood, "listening")
         compare(avatar.gesture, "perk")
-        wait(700)
-        verify(avatar.rightMoustache.raise > 0.5 && avatar.leftMoustache.raise > 0.5, "tips up")
+        during("perk", function() { return avatar.rightMoustache.raise > 0.5 && avatar.leftMoustache.raise > 0.5 }, "tips up")
         client.voice.state = "idle"
 
         // Disconnected: sleepy droop, breathing now and then.
         client.connection = "fatal"
         compare(avatar.mood, "sleepy")
-        tryCompare(avatar, "lastGesture", "doze", 1000)
-        wait(500)
-        verify(avatar.rightMoustache.raise < -0.6, "drooping tips")
+        until(function() { return avatar.lastGesture === "doze" }, 5000, "a doze")
+        until(function() { return avatar.rightMoustache.raise < -0.6 }, 5000, "drooping tips")
         console.log("QML_PASS")
       } catch (e) { console.log("QML_FAIL: " + e) }
       Qt.quit()

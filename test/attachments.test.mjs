@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { crc32, deflateSync } from 'node:zlib';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 import {
   ATTACHMENT_LIMITS, addWithinLimits, allowedImageUrl, autoFetched, downloadUrl, fileUrl, formatSize, isImage, localPathOf,
   markdownParts, mimeFor, uploadEndpoint, validStoredName, validUploadId,
@@ -102,39 +102,44 @@ test('composer: attach icon left of the mic, chips with thumbnail/size/remove, a
   }
   ${find}
   property var shot: file("shot.png")
-  Timer { interval: 150; running: true; onTriggered: {
-    try {
-      var attach = find(composer, "attachButton")[0], mic = find(composer, "micButton")[0]
-      if (!attach || !mic || attach.iconText !== "󰏢" || attach.tooltipText !== "Attach files") throw Error("attach icon")
-      if (attach.mapToItem(composer, 0, 0).x >= mic.mapToItem(composer, 0, 0).x) throw Error("attach not left of mic")
-      attach.clicked()
-      if (composer.picks !== 1) throw Error("picker not opened")
-      var height = composer.implicitHeight
-      client.addAttachmentPaths([shot, "file://" + encodeURI(file("my notes.txt"))])
-      var inspect = client.sent[0]
-      if (inspect.type !== "inspect_files" || inspect.paths[0] !== shot || inspect.paths[1] !== file("my notes.txt")) throw Error("inspect " + JSON.stringify(inspect))
-      client.handleLine(JSON.stringify({type:"files_inspected", requestId: inspect.requestId, files:[
-        {path: shot, name: "shot.png", size: 1572864, mime: "image/png"}, {path: file("my notes.txt"), name: "my notes.txt", size: 5, mime: "text/plain"}]}))
-      if (client.attachments.length !== 2) throw Error("not attached")
-    } catch(e) { console.log("QML_FAIL", String(e)); Qt.exit(1) }
-  }}
-  Timer { interval: 700; running: true; onTriggered: {
-    try {
-      var chips = find(composer, "attachmentChip")
-      if (chips.length !== 2) throw Error("chips " + chips.length)
-      if (chips[0].mapToItem(composer, 0, 0).y >= find(composer, "micButton")[0].mapToItem(composer, 0, 0).y) throw Error("chips not above the field")
-      var thumb = find(chips[0], "chipThumb")[0]
-      if (!thumb || thumb.status !== Image.Ready || !thumb.asynchronous) throw Error("thumbnail")
-      if (find(chips[1], "chipThumb").length) throw Error("thumbnail for text")
-      if (find(chips[0], "chipName")[0].text !== "shot.png" || find(chips[0], "chipSize")[0].text !== "1.5 MB") throw Error("chip text")
-      client.handleLine(JSON.stringify({type:"files_inspected", requestId:"x", files:[{path:"/big", name:"big.iso", size: 30 * 1048576, mime:"x"}]}))
-      if (client.notice !== "big.iso is too large: up to 25 MB per file." || client.noticeLevel !== "error") throw Error("limit notice " + client.notice)
-      if (client.attachments.length !== 2) throw Error("refused file kept")
-      find(chips[1], "chipRemove")[0].clicked()
-      if (client.attachments.length !== 1 || client.attachments[0].name !== "shot.png") throw Error("remove")
-      console.log("QML_PASS"); Qt.quit()
-    } catch(e) { console.log("QML_FAIL", String(e)); Qt.exit(1) }
-  }}
+  TestCase {
+    id: checks; name: "Chips"; when: false
+    ${poll}
+    function run() {
+      try {
+        var attach = find(composer, "attachButton")[0], mic = find(composer, "micButton")[0]
+        if (!attach || !mic || attach.iconText !== "󰏢" || attach.tooltipText !== "Attach files") throw Error("attach icon")
+        if (attach.mapToItem(composer, 0, 0).x >= mic.mapToItem(composer, 0, 0).x) throw Error("attach not left of mic")
+        attach.clicked()
+        if (composer.picks !== 1) throw Error("picker not opened")
+        var height = composer.implicitHeight
+        client.addAttachmentPaths([shot, "file://" + encodeURI(file("my notes.txt"))])
+        var inspect = client.sent[0]
+        if (inspect.type !== "inspect_files" || inspect.paths[0] !== shot || inspect.paths[1] !== file("my notes.txt")) throw Error("inspect " + JSON.stringify(inspect))
+        client.handleLine(JSON.stringify({type:"files_inspected", requestId: inspect.requestId, files:[
+          {path: shot, name: "shot.png", size: 1572864, mime: "image/png"}, {path: file("my notes.txt"), name: "my notes.txt", size: 5, mime: "text/plain"}]}))
+        if (client.attachments.length !== 2) throw Error("not attached")
+        // Chips are laid out and the thumbnail decodes asynchronously.
+        var chips = []
+        settle(function() {
+          chips = find(composer, "attachmentChip")
+          if (chips.length !== 2) throw Error("chips " + chips.length)
+          if (chips[0].mapToItem(composer, 0, 0).y >= find(composer, "micButton")[0].mapToItem(composer, 0, 0).y) throw Error("chips not above the field")
+          var thumb = find(chips[0], "chipThumb")[0]
+          if (!thumb || thumb.status !== Image.Ready || !thumb.asynchronous) throw Error("thumbnail")
+        })
+        if (find(chips[1], "chipThumb").length) throw Error("thumbnail for text")
+        if (find(chips[0], "chipName")[0].text !== "shot.png" || find(chips[0], "chipSize")[0].text !== "1.5 MB") throw Error("chip text")
+        client.handleLine(JSON.stringify({type:"files_inspected", requestId:"x", files:[{path:"/big", name:"big.iso", size: 30 * 1048576, mime:"x"}]}))
+        if (client.notice !== "big.iso is too large: up to 25 MB per file." || client.noticeLevel !== "error") throw Error("limit notice " + client.notice)
+        if (client.attachments.length !== 2) throw Error("refused file kept")
+        find(chips[1], "chipRemove")[0].clicked()
+        if (client.attachments.length !== 1 || client.attachments[0].name !== "shot.png") throw Error("remove")
+        console.log("QML_PASS"); Qt.quit()
+      } catch(e) { console.log("QML_FAIL", String(e)); Qt.exit(1) }
+    }
+  }
+  Timer { interval: 150; running: true; onTriggered: checks.run() }
   `, {files: {'shot.png': png()}});
 });
 
@@ -196,37 +201,35 @@ test('Ctrl+V attaches a clipboard image as a private temp file, and pastes text 
   FloatingWindow {
     visible: true; width: 600; height: 500
     Plugin.Composer { id: composer; client: client; width: 500; property int textPastes: 0; function pasteText() { textPastes++ } }
-    Image { id: check; asynchronous: false }
+    Image { id: pasted; asynchronous: false }
   }
   ${find}
   TestCase {
     id: checks; name: "Paste"; when: false
+    ${poll}
     function run() {
-      composer.forceActiveFocus()
-      keyClick(Qt.Key_V, Qt.ControlModifier)
-    }
-    function verifyImage() {
       try {
+        composer.forceActiveFocus()
+        keyClick(Qt.Key_V, Qt.ControlModifier)
+        // Listing the clipboard types and saving the image are processes.
+        until(function() { return client.sent.length > 0 }, 10000, "the pasted image is attached")
         var inspect = client.sent[0]
         if (!inspect || inspect.type !== "inspect_files") throw Error("no attach " + JSON.stringify(client.sent))
         var dir = Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-gentle-dot/"
         if (inspect.paths[0].indexOf(dir + "pasted-") !== 0 || !/\\.png$/.test(inspect.paths[0])) throw Error("path " + inspect.paths[0])
-        check.source = "file://" + inspect.paths[0]
-        if (check.status !== Image.Ready || check.implicitWidth !== 4) throw Error("pasted bytes")
+        pasted.source = "file://" + inspect.paths[0]
+        if (pasted.status !== Image.Ready || pasted.implicitWidth !== 4) throw Error("pasted bytes")
         if (composer.textPastes !== 0) throw Error("text pasted too")
         client.clipboardListCommand = [file("list-text")]
         keyClick(Qt.Key_V, Qt.ControlModifier)
-      } catch (e) { console.log("QML_FAIL: " + e); Qt.quit() }
-    }
-    function verifyText() {
-      if (composer.textPastes !== 1 || client.sent.length !== 1) console.log("QML_FAIL: text fallback " + composer.textPastes)
-      else console.log("QML_PASS")
+        until(function() { return composer.textPastes > 0 }, 10000, "text clipboard falls back to a text paste")
+        if (composer.textPastes !== 1 || client.sent.length !== 1) throw Error("text fallback " + composer.textPastes + " " + JSON.stringify(client.sent))
+        console.log("QML_PASS")
+      } catch (e) { console.log("QML_FAIL: " + e) }
       Qt.quit()
     }
   }
   Timer { interval: 100; running: true; onTriggered: checks.run() }
-  Timer { interval: 900; running: true; onTriggered: checks.verifyImage() }
-  Timer { interval: 1600; running: true; onTriggered: checks.verifyText() }
   `, {files: {
     'list-types': '#!/bin/sh\nprintf "text/plain\\nimage/png\\n"\n',
     'list-text': '#!/bin/sh\nprintf "text/plain;charset=utf-8\\nUTF8_STRING\\n"\n',
@@ -246,31 +249,38 @@ test('chat: own image attachments show low-quality thumbnails that open the view
   }
   ${find}
   property var shot: file("shot.png")
-  Timer { interval: 150; running: true; onTriggered: {
-    client.handleLine(JSON.stringify({type:"upload_done", requestId:"r", files:[{path: shot, uploadId:"u_abcdefgh12", name:"shot.png", size:120, mime:"image/png"}]}))
-    client.handleLine(JSON.stringify({type:"history", messages:[{id:"m", role:"user", text:"", attachments:[
-      {name:"shot.png", size:120, mime:"image/png"}, {name:"from-mac.png", size:2048, mime:"image/png"}, {name:"notes.txt", size:5, mime:"text/plain"}]}]}))
-  }}
-  Timer { interval: 800; running: true; onTriggered: {
-    try {
-      var thumbs = find(chat, "attachmentThumb")
-      if (thumbs.length !== 1) throw Error("thumbs " + thumbs.length)
-      var image = find(thumbs[0], "attachmentThumbImage")[0]
-      if (image.status !== Image.Ready || image.sourceSize.width !== 240 || !image.asynchronous || !image.cache) throw Error("thumbnail image " + image.sourceSize.width)
-      var chips = find(chat, "attachmentChip")
-      if (chips.length !== 2) throw Error("chips " + chips.length)
-      if (find(chips[0], "chipNote")[0].text !== "preview unavailable") throw Error("no preview note")
-      if (find(chips[1], "chipNote").length !== 0) throw Error("note on a text file")
-      if (find(chat, "userText").length !== 0) throw Error("empty text bubble shown")
-      find(thumbs[0], "attachmentThumbHit")[0].clicked(null)
-      if (!client.viewerImage || client.viewerImage.path !== shot || client.viewerImage.mime !== "image/png") throw Error("viewer " + JSON.stringify(client.viewerImage))
-      var images = find(reply, "markdownImage")
-      if (images.length !== 1 || images[0].status !== Image.Ready) throw Error("markdown images " + images.length)
-      var prose = find(reply, "proseText").map(function(item) { return item.text }).join("|")
-      if (/!\\[|tracker/.test(prose) || !/pixel/.test(prose)) throw Error("prose " + prose)
-      console.log("QML_PASS"); Qt.quit()
-    } catch(e) { console.log("QML_FAIL", String(e)); Qt.exit(1) }
-  }}
+  TestCase {
+    id: checks; name: "OwnImages"; when: false
+    ${poll}
+    function run() {
+      try {
+        client.handleLine(JSON.stringify({type:"upload_done", requestId:"r", files:[{path: shot, uploadId:"u_abcdefgh12", name:"shot.png", size:120, mime:"image/png"}]}))
+        client.handleLine(JSON.stringify({type:"history", messages:[{id:"m", role:"user", text:"", attachments:[
+          {name:"shot.png", size:120, mime:"image/png"}, {name:"from-mac.png", size:2048, mime:"image/png"}, {name:"notes.txt", size:5, mime:"text/plain"}]}]}))
+        // The list lays out its delegates and the thumbnails decode asynchronously.
+        var thumbs = [], chips = []
+        settle(function() {
+          thumbs = find(chat, "attachmentThumb")
+          if (thumbs.length !== 1) throw Error("thumbs " + thumbs.length)
+          var image = find(thumbs[0], "attachmentThumbImage")[0]
+          if (image.status !== Image.Ready || image.sourceSize.width !== 240 || !image.asynchronous || !image.cache) throw Error("thumbnail image " + image.sourceSize.width)
+          chips = find(chat, "attachmentChip")
+          if (chips.length !== 2) throw Error("chips " + chips.length)
+          var images = find(reply, "markdownImage")
+          if (images.length !== 1 || images[0].status !== Image.Ready) throw Error("markdown images " + images.length)
+        })
+        if (find(chips[0], "chipNote")[0].text !== "preview unavailable") throw Error("no preview note")
+        if (find(chips[1], "chipNote").length !== 0) throw Error("note on a text file")
+        if (find(chat, "userText").length !== 0) throw Error("empty text bubble shown")
+        find(thumbs[0], "attachmentThumbHit")[0].clicked(null)
+        if (!client.viewerImage || client.viewerImage.path !== shot || client.viewerImage.mime !== "image/png") throw Error("viewer " + JSON.stringify(client.viewerImage))
+        var prose = find(reply, "proseText").map(function(item) { return item.text }).join("|")
+        if (/!\\[|tracker/.test(prose) || !/pixel/.test(prose)) throw Error("prose " + prose)
+        console.log("QML_PASS"); Qt.quit()
+      } catch(e) { console.log("QML_FAIL", String(e)); Qt.exit(1) }
+    }
+  }
+  Timer { interval: 150; running: true; onTriggered: checks.run() }
   `, {files: {'shot.png': png()}});
 });
 
@@ -284,22 +294,24 @@ test('image viewer: original resolution scaled to fit, copy image with its type,
   }
   ${find}
   property var shot: file("shot.png")
+  // The first result of the copy, taken as it happens (it resets to idle after about 1.5 s).
+  property string copyResult: ""
+  Connections { target: viewer; function onCopyStateChanged() { if (viewer.copyState !== "idle" && !copyResult) copyResult = viewer.copyState } }
   TestCase {
     id: checks; name: "Viewer"; when: false
-    function open() {
-      client.openImage({path: shot, name: "shot.png", mime: "image/png"})
-    }
+    ${poll}
     function run() {
       try {
-        var image = find(viewer, "viewerImage")[0]
-        if (!image || image.status !== Image.Ready || image.sourceSize.width !== 4 || image.paintedWidth < 100) throw Error("original image " + (image && image.paintedWidth))
+        client.openImage({path: shot, name: "shot.png", mime: "image/png"})
+        settle(function() {
+          var image = find(viewer, "viewerImage")[0]
+          if (!image || image.status !== Image.Ready || image.sourceSize.width !== 4 || image.paintedWidth < 100) throw Error("original image " + (image && image.paintedWidth))
+        })
         if (find(viewer, "viewerName")[0].text !== "shot.png") throw Error("name")
         find(viewer, "viewerCopy")[0].clicked()
-      } catch (e) { console.log("QML_FAIL: " + e); Qt.quit() }
-    }
-    function afterCopy() {
-      try {
-        if (viewer.copyState !== "copied") throw Error("copy " + viewer.copyState)
+        // The copy command is a process.
+        until(function() { return copyResult !== "" }, 10000, "the copy command finishes")
+        if (copyResult !== "copied") throw Error("copy " + copyResult)
         find(viewer, "viewerAttach")[0].clicked()
         if (client.sent[0].type !== "inspect_files" || client.sent[0].paths[0] !== shot) throw Error("attach back")
         if (client.viewerImage !== null) throw Error("viewer stayed open after attach")
@@ -313,9 +325,7 @@ test('image viewer: original resolution scaled to fit, copy image with its type,
       Qt.quit()
     }
   }
-  Timer { interval: 100; running: true; onTriggered: checks.open() }
-  Timer { interval: 500; running: true; onTriggered: checks.run() }
-  Timer { interval: 1200; running: true; onTriggered: checks.afterCopy() }
+  Timer { interval: 100; running: true; onTriggered: checks.run() }
   `, {files: {
     'shot.png': png(),
     'copy-image': `#!/bin/sh\n[ "$1" = "--type" ] && [ "$2" = "image/png" ] || exit 3\n[ "$(base64 -w0)" = "${png().toString('base64')}" ] || exit 4\n`,
@@ -354,26 +364,27 @@ test('drag and drop: highlight while dragging, local files attach, other URLs on
   }
   function card() { return find(overlay, "dropOverlayCard")[0] }
   // The harness imports no Quickshell.Io: create the probe at run time.
-  property var probe: Qt.createQmlObject("import Quickshell.Io; Process { property alias out: collector.text; stdout: StdioCollector { id: collector; waitForEnd: true } }", overlay)
+  property var probe: Qt.createQmlObject("import Quickshell.Io; Process { id: proc; property alias out: collector.text; property bool done: false; stdout: StdioCollector { id: collector; waitForEnd: true; onStreamFinished: proc.done = true } }", overlay)
   TestCase {
     id: checks; name: "Drop"; when: false
+    ${poll}
     function run() {
       try {
         if (card()) throw Error("overlay shown before any drag")
         // A real (internal) Qt Quick drag over the DropArea: enter shows, exit hides, drop hides.
+        // Drag moves are delivered as queued events.
         dragger.Drag.active = true
-        dragger.x = 100; dragger.y = 100; wait(50)
-        if (!overlay.dragging || !card()) throw Error("overlay not shown on enter")
+        dragger.x = 100; dragger.y = 100
+        until(function() { return overlay.dragging && card() }, 5000, "overlay not shown on enter")
         if (find(overlay, "dropOverlayLabel")[0].text !== "Drop to attach") throw Error("label")
-        dragger.x = 500; dragger.y = 500; wait(50)
-        if (overlay.dragging || card()) throw Error("overlay still shown after exit")
-        dragger.x = 100; dragger.y = 100; wait(50)
-        if (!card()) throw Error("overlay not shown on re-enter")
+        dragger.x = 500; dragger.y = 500
+        until(function() { return !overlay.dragging && !card() }, 5000, "overlay still shown after exit")
+        dragger.x = 100; dragger.y = 100
+        until(function() { return card() }, 5000, "overlay not shown on re-enter")
         dragger.Drag.drop()
         dragger.Drag.active = false
-        wait(50)
+        until(function() { return !overlay.dragging && !card() }, 5000, "overlay still shown after drop")
         if (client.sent.length) throw Error("an internal drag without data attached something")
-        if (overlay.dragging || card()) throw Error("overlay still shown after drop")
         var none = fakeDrop([], undefined)
         overlay.enter(none)
         if (none.accepted || overlay.dragging) throw Error("accepted a drag with neither files nor text")
@@ -420,27 +431,22 @@ test('drag and drop: highlight while dragging, local files attach, other URLs on
         overlay.drop(fakeDrop([], " \\n\\t "))
         overlay.drop(fakeDrop([], dropped))
         if (overlay.dragging) throw Error("overlay shown after a text drop")
-      } catch (e) { console.log("QML_FAIL: " + e); Qt.quit() }
-    }
-    function verifyText() {
-      try {
+        // The text is saved to a file before it is attached.
+        until(function() { return client.sent.length >= 3 }, 10000, "text drop not attached")
         if (client.sent.length !== 3) throw Error("text drop not attached " + JSON.stringify(client.sent))
         var path = client.sent[2].paths[0]
         var dir = Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-gentle-dot/"
         if (client.sent[2].type !== "inspect_files" || path.indexOf(dir) !== 0 || !/^dropped-text-\\d+\\.txt$/.test(path.slice(dir.length))) throw Error("path " + path)
         probe.command = ["sh", "-c", "stat -c %a -- \\"$1\\" \\"$2\\" && cat -- \\"$2\\"", "sh", dir, path]
         probe.running = true
-      } catch (e) { console.log("QML_FAIL: " + e); Qt.quit() }
-    }
-    function verifyFile() {
-      var expected = "700\\n600\\n" + dropped
-      if (probe.out !== expected) console.log("QML_FAIL: file " + JSON.stringify(probe.out))
-      else console.log("QML_PASS")
+        until(function() { return probe.done }, 10000, "the file check finishes")
+        var expected = "700\\n600\\n" + dropped
+        if (probe.out !== expected) throw Error("file " + JSON.stringify(probe.out))
+        console.log("QML_PASS")
+      } catch (e) { console.log("QML_FAIL: " + e) }
       Qt.quit()
     }
   }
   Timer { interval: 150; running: true; onTriggered: checks.run() }
-  Timer { interval: 900; running: true; onTriggered: checks.verifyText() }
-  Timer { interval: 1500; running: true; onTriggered: checks.verifyFile() }
   `, {files: {'shot.png': png()}});
 });

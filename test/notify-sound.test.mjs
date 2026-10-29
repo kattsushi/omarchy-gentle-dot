@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 // The Omarchy notification service plays no sound, so the plugin does: one freedesktop sound
 // per kind, skipped when the user turned sounds off or Omarchy's Do Not Disturb is on.
@@ -34,11 +34,19 @@ test('notification sounds: per kind, off switch, Do Not Disturb', async t => {
     id: checks; when: false
     function frame(msg) { client.handleLine(JSON.stringify(msg)) }
     function reply(id) { frame({type: "message_done", messageId: id, text: "Done"}) }
+    ${poll}
+    // Notifications and sounds are recorder processes (a sound starts once its wake clip ends):
+    // wait until that many have reported, then a little longer so that an extra one would show
+    // up too. Every later count is exact, so a stray one fails the next one at the latest.
     function counts(n, s) {
-      wait(200)
-      if (client.notified.length !== n || client.played.length !== s || client.wakes !== s)
-        throw Error("expected " + n + " notifications and " + s + " sounds after as many wake clips, got "
+      var reached = function() { return client.notified.length >= n && client.played.length >= s && client.wakes >= s }
+      var wrong = function() {
+        return Error("expected " + n + " notifications and " + s + " sounds after as many wake clips, got "
           + client.notified.length + ", " + client.played.length + " and " + client.wakes)
+      }
+      try { until(reached) } catch (e) { throw wrong() }
+      wait(200)
+      if (client.notified.length !== n || client.played.length !== s || client.wakes !== s) throw wrong()
     }
     function sound(i) { var args = client.played[i]; return String(args[args.length - 1]).split("/").pop() }
     function run() {
@@ -85,7 +93,7 @@ test('notification sounds: per kind, off switch, Do Not Disturb', async t => {
   }
   Timer { interval: 1; running: true; onTriggered: checks.run() }
   `, {
-    timeout: 20000,
+    timeout: 60000,
     files: {
       record: '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));\n',
       'record-sound': '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));\n',

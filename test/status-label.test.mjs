@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 // The status label on the composer's top border (S17), driven by daemon frames through
 // Client.handleLine. send() is replaced, so nothing leaves the harness.
@@ -39,13 +39,15 @@ test('status label: ready, thinking, waiting, running command, ODD phase, back t
       verify(icons - right <= 12, "right edge right before the icons: gap " + (icons - right))
       verify(left >= c.avatar.width + 6, "clear of the avatar: " + left)
     }
+    ${poll}
     function expect(text, tone) {
       compare(client.statusLabel, text)
       if (tone) compare(client.statusTone, tone)
       // The legend fades to the new text.
-      wait(400)
-      compare(composer.statusItem.text, text)
-      compare(composer.statusItem.opacity, 1)
+      settle(function() {
+        if (composer.statusItem.text !== text) throw Error("legend shows " + JSON.stringify(composer.statusItem.text) + ", not " + JSON.stringify(text))
+        if (composer.statusItem.opacity !== 1) throw Error("legend opacity " + composer.statusItem.opacity)
+      })
     }
     function run() {
       try {

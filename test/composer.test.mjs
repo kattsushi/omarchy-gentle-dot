@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 test('composer: Enter sends once, Shift+Enter edits shared draft, dictation and failed send preserve it', async t => {
   await qml(t, `
@@ -23,6 +23,7 @@ test('composer: Enter sends once, Shift+Enter edits shared draft, dictation and 
     id: checks
     name: "Composer"
     when: false
+    ${poll}
     function run() {
       try {
         client.connection = "open"; client.ready = true
@@ -56,8 +57,7 @@ test('composer: Enter sends once, Shift+Enter edits shared draft, dictation and 
         compare(client.draft, "line\\ndictation")
         const one = composer.implicitHeight
         client.draft = Array(20).fill("wrapped words").join("\\n")
-        wait(20)
-        verify(composer.implicitHeight > one)
+        until(function() { return composer.implicitHeight > one }, 5000, "the composer grows with the text")
         verify(composer.implicitHeight <= composer.maximumHeight)
         verify(composer.editor.wrapMode === TextEdit.Wrap)
         compare(composer.placeholderText, "Message Gentle Dot")

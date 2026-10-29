@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 // `hyprctl binds -j` as Hyprland 0.56 prints it: Lua binds carry only their description,
 // hyprlang binds their exec command.
@@ -38,18 +38,18 @@ test('Settings → Shortcut: detects the binding from hyprctl and copies the set
   TestCase {
     id: checks; when: false
     function eq(actual, expected, what) { if (actual !== expected) throw Error((what || "") + " expected " + JSON.stringify(expected) + ", got " + JSON.stringify(actual)) }
-    function check(ok, what) { if (!ok) throw Error("check failed: " + what) }
+    ${poll}
     function path(name) { return String(Qt.resolvedUrl(name)).replace(/^file:\\/\\//, "") }
     function label() { return findChild(settings, "shortcutState").text }
     function detect(name, expected) {
       settings.hyprctlCommand = path(name)
       settings.checkShortcut()
-      tryVerify(function() { return label() === expected }, 5000, name + ": " + label())
+      until(function() { return label() === expected }, 10000, name + ": " + label())
     }
     function run() {
       try {
         // Checked when Settings is created.
-        tryVerify(function() { return label() === "Keyboard shortcut: SUPER + ALT + D (not set up)" }, 5000, label())
+        until(function() { return label() === "Keyboard shortcut: SUPER + ALT + D (not set up)" }, 10000, label())
         detect("hyprctl-lua", "Keyboard shortcut: SUPER + ALT + D (set up)")
         // A hyprlang exec bind on other keys: those keys are shown.
         detect("hyprctl-exec", "Keyboard shortcut: SUPER + CTRL + SHIFT + G (set up)")
@@ -61,8 +61,8 @@ test('Settings → Shortcut: detects the binding from hyprctl and copies the set
         var copy = findChild(settings, "copyShortcut")
         check(copy && copy.visible, "Copy setup button")
         eq(copy.text, "Copy setup")
-        mouseClick(copy)
-        tryVerify(function() { return settings.shortcutFeedback !== "" }, 5000, "copy feedback")
+        press(copy)
+        until(function() { return settings.shortcutFeedback !== "" }, 10000, "copy feedback")
         eq(settings.shortcutFeedback, 'Copied. Save it as ~/.config/hypr/gentle-dot.lua and add require("hypr.gentle-dot") to ~/.config/hypr/hyprland.lua.')
         console.log("QML_PASS")
       } catch (e) { console.log("QML_FAIL: " + e) }

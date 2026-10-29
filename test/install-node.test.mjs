@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 const NODE_MESSAGE = 'Gentle Dot needs Node.js 22 or newer. Install it (e.g. `omarchy pkg add nodejs` or mise) and reopen the panel.';
 
@@ -42,13 +42,14 @@ test('a missing or too-old Node stops the panel with what to install, and Retry 
     property int starts: 0
     property int before: 0
     function eq(actual, expected, what) { if (actual !== expected) throw Error((what || "") + " expected " + JSON.stringify(expected) + ", got " + JSON.stringify(actual)) }
+    ${poll}
     function path(name) { return String(Qt.resolvedUrl(name)).replace(/^file:\\/\\//, "") }
     function connect(name) {
       before = starts
       client.configure({nodePath: name.indexOf("/") === 0 ? name : path(name), serverUrl: "ws://127.0.0.1:9/ws", tokenFile: "/nonexistent/token", notifications: false})
     }
     function fatal(reason, message, what) {
-      tryVerify(function() { return starts > before && client.connection === "fatal" }, 5000, what + ": never fatal")
+      until(function() { return starts > before && client.connection === "fatal" }, 10000, what + ": never fatal")
       eq(client.fatalReason, reason, what)
       eq(client.fatalMessage, message, what)
     }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 // The avatar falls asleep after avatarSleepMinutes without activity (S15.6). The clock is faked
 // with client.clockOffset (milliseconds added to Date.now()); checkSleep() is what the
@@ -34,7 +34,10 @@ const helpers = `
     var letters = []
     for (var i = 0; i < layer.children.length; i++) if (layer.children[i].text) letters.push(layer.children[i])
     return { layer: layer, letters: letters }
-  }`;
+  }
+  ${poll}
+  // A reaction (waking up, happy, surprised) has finished.
+  function calm() { until(function() { return avatar.reaction === "" }, 10000, "the reaction ends") }`;
 
 test('avatar sleep: falls asleep after the timeout, z letters only while asleep and shown, wakes on a draft change', async t => {
   await qml(t, `
@@ -59,8 +62,7 @@ test('avatar sleep: falls asleep after the timeout, z letters only while asleep 
         idleFor(31)
         verify(client.asleep, "asleep after 31 minutes")
         compare(avatar.mood, "asleep")
-        wait(400)
-        verify(avatar.leftEye.open < 0.01 && avatar.rightEye.open < 0.01, "eyes shut")
+        until(function() { return avatar.leftEye.open < 0.01 && avatar.rightEye.open < 0.01 }, 5000, "eyes shut")
         verify(!named(avatar, "leftPupil").visible, "no pupils")
         var z = zLetters()
         verify(z.layer.visible, "z letters while asleep")
@@ -68,11 +70,9 @@ test('avatar sleep: falls asleep after the timeout, z letters only while asleep 
         verify(z.letters[2].font.pixelSize > z.letters[0].font.pixelSize || z.letters[4].font.pixelSize > z.letters[1].font.pixelSize, "small z, bigger Z")
         for (var i = 0; i < z.letters.length; i++) verify(z.letters[i].opacity <= 0.7, "reduced opacity")
         var before = z.letters.map(function(l) { return l.y })
-        wait(300)
-        var moved = z.letters.filter(function(l, k) { return l.y < before[k] }).length
-        verify(moved >= 3, "the letters rise: " + moved)
+        until(function() { return z.letters.filter(function(l, k) { return l.y < before[k] }).length >= 3 }, 5000, "the letters rise")
         verify(avatar.breathing, "slow breathing")
-        tryCompare(avatar, "lastGesture", "snooze", 1500)
+        until(function() { return avatar.lastGesture === "snooze" }, 5000, "a snooze")
         verify(avatar.ticking)
 
         // Hidden: nothing animates, no z, still asleep.
@@ -93,9 +93,8 @@ test('avatar sleep: falls asleep after the timeout, z letters only while asleep 
         compare(avatar.gesture, "wakeup")
         verify(avatar.gestureCount > count)
         verify(!zLetters().layer.visible, "no z while waking")
-        wait(400)
-        verify(avatar.leftEye.open > 0.3, "eyes open")
-        tryCompare(avatar, "mood", "idle", 2500)
+        until(function() { return avatar.leftEye.open > 0.3 }, 5000, "eyes open")
+        until(function() { return avatar.mood === "idle" }, 10000, "awake: " + avatar.mood)
         console.log("QML_PASS")
       } catch (e) { console.log("QML_FAIL: " + e) }
       Qt.quit()
@@ -127,38 +126,38 @@ test('avatar sleep: a click wakes it instead of the happy reaction; a new messag
         compare(avatar.mood, "waking", "wakes instead of the happy reaction")
         compare(avatar.clicks, 0)
         compare(avatar.gesture, "wakeup")
-        tryCompare(avatar, "mood", "idle", 2500)
+        until(function() { return avatar.mood === "idle" }, 10000, "awake")
         // Awake, a click is the usual happy reaction (and counts as activity).
         mouseClick(avatar)
         compare(avatar.mood, "happy")
         compare(avatar.clicks, 1)
-        wait(1300)
+        calm()
 
         idleFor(45)
         compare(avatar.mood, "asleep")
         client.handleLine(JSON.stringify({type: "user_message", messageId: "u1", text: "hola"}))
         verify(!client.asleep, "a new message wakes it")
         compare(avatar.mood, "waking")
-        wait(1600)
+        calm()
 
         idleFor(45)
         client.handleLine(JSON.stringify({type: "message_delta", messageId: "a1", delta: "Hi"}))
         verify(!client.asleep, "a reply streaming in wakes it")
         client.handleLine(JSON.stringify({type: "message_done", messageId: "a1", text: "Hi"}))
-        wait(1600)
+        calm()
 
         idleFor(45)
         compare(avatar.mood, "asleep")
         avatar.pointAt(10, 10)
         verify(!client.asleep, "the pointer over the panel wakes it")
         compare(avatar.mood, "waking")
-        wait(1600)
+        calm()
 
         idleFor(45)
         client.voice.state = "loading"
         verify(!client.asleep, "dictation wakes it")
         client.voice.state = "idle"
-        wait(1600)
+        calm()
 
         // A question while asleep: wakes it and the question shows (alert outranks waking).
         idleFor(45)
@@ -202,7 +201,7 @@ test('avatar sleep: counted while hidden, checked when shown; 0 never sleeps; bu
         // The minute timer runs the check (interval shortened for the test).
         client.sleepCheckInterval = 50
         client.clockOffset = client.lastActivity - Date.now() + 40 * ${MINUTE}
-        tryVerify(function() { return client.asleep }, 1000, "the periodic check puts it to sleep")
+        until(function() { return client.asleep }, 5000, "the periodic check puts it to sleep")
         client.sleepCheckInterval = ${MINUTE}
         client.noteActivity()
         avatar.active = true
@@ -226,7 +225,7 @@ test('avatar sleep: counted while hidden, checked when shown; 0 never sleeps; bu
         verify(!client.asleep, "an upload is running")
         client.uploading = false
         // Turning sleep off and the agent starting both woke it: let the wake-up finish.
-        tryCompare(avatar, "reaction", "", 2500)
+        calm()
 
         // Disconnected: its own sleepy look (one z), even when the inactivity timer says asleep.
         client.handleLine(JSON.stringify({type: "bridge", state: "fatal", reason: "unauthorized"}))
@@ -282,7 +281,7 @@ test('avatar sleep: a key typed in the composer wakes it, then it shows typing',
         compare(avatar.mood, "waking")
         compare(client.draft, "h")
         keyClick(Qt.Key_I)
-        tryCompare(avatar, "mood", "typing", 2500)
+        until(function() { return avatar.mood === "typing" }, 10000, "typing")
         console.log("QML_PASS")
       } catch (e) { console.log("QML_FAIL: " + e) }
       Qt.quit()
@@ -321,7 +320,7 @@ test('avatar sleep setting: Settings → Appearance saves it with every other se
         compare(found.map(function(b) { return b.objectName }).join(","), "avatarSleep0,avatarSleep15,avatarSleep30,avatarSleep60")
         verify(found[2].text.indexOf("●") === 0, "30 selected: " + found[2].text)
         compare(found[0].text, "Off")
-        mouseClick(found[1])
+        press(found[1])
         compare(client.saved.avatarSleepMinutes, 15)
         compare(client.saved.serverUrl, "wss://mac/ws")
         compare(client.saved.tokenFile, "~/t")
@@ -329,7 +328,7 @@ test('avatar sleep setting: Settings → Appearance saves it with every other se
         compare(client.saved.panelOpacity, 0.9)
         compare(client.avatarSleepMinutes, 15)
         verify(found[1].text.indexOf("●") === 0)
-        mouseClick(found[0])
+        press(found[0])
         compare(client.saved.avatarSleepMinutes, 0)
         compare(client.avatarSleepMinutes, 0)
         client.entrySettings = ({avatarSleepMinutes: "nope"})

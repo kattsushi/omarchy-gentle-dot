@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 const named = `
   function named(item, name) {
@@ -14,25 +14,6 @@ const named = `
     if (item.objectName === name) return item
     for (var i = 0; i < item.children.length; i++) { var found = shown(item.children[i], name); if (found) return found }
     return null
-  }`;
-
-// Condition polling inside a TestCase (wait() keeps the event loop running). The suite runs files
-// in parallel, so timeouts are generous upper bounds, never the expected delay.
-const poll = `
-  function check(condition, message) { if (!condition) throw Error(message || "check failed") }
-  function until(condition, timeout, message) {
-    var end = Date.now() + (timeout || 10000)
-    while (!condition()) {
-      if (Date.now() > end) throw Error("timed out: " + (message || condition))
-      wait(20)
-    }
-  }
-  // Retries layout-dependent checks until they all hold; past the timeout, the last failure.
-  function settle(checks, timeout) {
-    var end = Date.now() + (timeout || 10000)
-    for (;;) {
-      try { return checks() } catch (e) { if (Date.now() > end) throw e; wait(20) }
-    }
   }`;
 
 // Runs the statements in a TestCase once the scene exists: QML_PASS unless one throws.
@@ -75,6 +56,13 @@ test('reply copy icon sends the raw text to the clipboard and shows Copied for a
     clipboardCommand: [Qt.resolvedUrl("clipboard").toString().replace("file://", "")] }
   Plugin.MessageBubble { id: streaming; width: 500; role: "assistant"; phase: "streaming"; error: ""; activities: "[]"; text: "partial" }
   Plugin.MessageBubble { id: user; width: 500; role: "user"; phase: "done"; error: ""; activities: "[]"; text: "mine" }
+  // When Copied starts and ends, taken as it happens (polling would see it late under load).
+  property real copiedAt: 0
+  property real resetAt: 0
+  Connections {
+    target: bubble
+    function onCopyStateChanged() { if (bubble.copyState === "copied") copiedAt = Date.now(); else if (bubble.copyState === "idle") resetAt = Date.now() }
+  }
   ${checks(`
     var copy = null
     settle(function() {
@@ -85,11 +73,10 @@ test('reply copy icon sends the raw text to the clipboard and shows Copied for a
     })
     copy.clicked()
     until(function() { return bubble.copyState !== "idle" }, 10000, "the clipboard command finishes")
-    var copiedAt = Date.now()
     if (bubble.copyState !== "copied" || copy.iconText !== "󰄬" || copy.tooltipText !== "Copied") throw Error("copied " + bubble.copyState)
     until(function() { return bubble.copyState === "idle" }, 10000, "Copied resets")
     // A lower bound only (load can only make it later).
-    if (Date.now() - copiedAt < 1000) throw Error("Copied for about 1.5 s, not " + (Date.now() - copiedAt))
+    if (resetAt - copiedAt < 1000) throw Error("Copied for about 1.5 s, not " + (resetAt - copiedAt))
     if (copy.iconText !== "󰆏") throw Error("reset icon")
   `)}
   `, {files:{clipboard:`#!/usr/bin/env node

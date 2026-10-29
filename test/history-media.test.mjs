@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { crc32, deflateSync } from 'node:zlib';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 // History times (S14.3) and history images fetched through the bridge (S14.5, daemon contract S14.7).
 
@@ -39,33 +39,40 @@ test('history messages with `at` show their time, the daemon\'s live `at` wins o
   ${helpers}
   property real t0: 0
   property real twoDaysAgo: 0
-  Timer { interval: 150; running: true; onTriggered: {
-    t0 = Date.now()
-    twoDaysAgo = t0 - 2 * 86400000
-    client.now = t0
-    client.handleLine(JSON.stringify({type:"history", messages:[
-      {id:"h1", role:"user", text:"Earlier question", at: t0 - 5 * 60000},
-      {id:"h2", role:"assistant", text:"Earlier answer", at: t0 - 3 * 3600000},
-      {id:"h3", role:"user", text:"From an old daemon"}]}))
-    client.handleLine(JSON.stringify({type:"message_delta", messageId:"r", delta:"Hi"}))
-    client.handleLine(JSON.stringify({type:"message_done", messageId:"r", text:"Hi", at: twoDaysAgo}))
-    client.handleLine(JSON.stringify({type:"message_delta", messageId:"s", delta:"Plain"}))
-    client.handleLine(JSON.stringify({type:"message_done", messageId:"s", text:"Plain"}))
-  }}
-  Timer { interval: 700; running: true; onTriggered: {
-    try {
-      if (times(0).join() !== "5 min ago") throw Error("history user time " + times(0))
-      if (times(1).join() !== "3 h ago") throw Error("history reply time " + times(1))
-      if (times(2).length !== 0) throw Error("time invented for history without at " + times(2))
-      if (client.messages.get(3).at !== twoDaysAgo) throw Error("receipt time kept over the daemon's at")
-      var date = new Date(twoDaysAgo)
-      var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-      var expected = months[date.getMonth()] + " " + date.getDate()
-      if (times(3).join().indexOf(expected) !== 0) throw Error("live at not shown " + times(3) + " vs " + expected)
-      if (times(4).join() !== "just now") throw Error("receipt time without at " + times(4))
-      console.log("QML_PASS"); Qt.quit()
-    } catch(e) { console.log("QML_FAIL", String(e)); Qt.exit(1) }
-  }}
+  TestCase {
+    id: checks; name: "HistoryTimes"; when: false
+    ${poll}
+    function run() {
+      try {
+        t0 = Date.now()
+        twoDaysAgo = t0 - 2 * 86400000
+        client.now = t0
+        client.handleLine(JSON.stringify({type:"history", messages:[
+          {id:"h1", role:"user", text:"Earlier question", at: t0 - 5 * 60000},
+          {id:"h2", role:"assistant", text:"Earlier answer", at: t0 - 3 * 3600000},
+          {id:"h3", role:"user", text:"From an old daemon"}]}))
+        client.handleLine(JSON.stringify({type:"message_delta", messageId:"r", delta:"Hi"}))
+        client.handleLine(JSON.stringify({type:"message_done", messageId:"r", text:"Hi", at: twoDaysAgo}))
+        client.handleLine(JSON.stringify({type:"message_delta", messageId:"s", delta:"Plain"}))
+        client.handleLine(JSON.stringify({type:"message_done", messageId:"s", text:"Plain"}))
+        // The list creates its delegates when it lays out.
+        settle(function() {
+          if (!row(4)) throw Error("rows not laid out")
+          if (times(0).join() !== "5 min ago") throw Error("history user time " + times(0))
+          if (times(1).join() !== "3 h ago") throw Error("history reply time " + times(1))
+        })
+        if (times(2).length !== 0) throw Error("time invented for history without at " + times(2))
+        if (client.messages.get(3).at !== twoDaysAgo) throw Error("receipt time kept over the daemon's at")
+        var date = new Date(twoDaysAgo)
+        var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        var expected = months[date.getMonth()] + " " + date.getDate()
+        if (times(3).join().indexOf(expected) !== 0) throw Error("live at not shown " + times(3) + " vs " + expected)
+        if (times(4).join() !== "just now") throw Error("receipt time without at " + times(4))
+        console.log("QML_PASS"); Qt.quit()
+      } catch(e) { console.log("QML_FAIL", String(e)); Qt.exit(1) }
+    }
+  }
+  Timer { interval: 150; running: true; onTriggered: checks.run() }
   `);
 });
 
@@ -97,16 +104,21 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
     {id:"m2", role:"user", text:"Mine", attachments:[{name:"shot.png", size:120, mime:"image/png", uploadId:"${OWN}"}]},
     {id:"m3", role:"user", text:"Gone", attachments:[{name:"gone.webp", size:5, mime:"image/webp", uploadId:"${GONE}"}]},
     {id:"m4", role:"user", text:"Flaky", attachments:[{name:"flaky.jpg", size:5, mime:"image/jpeg", uploadId:"${FLAKY}"}]}]})
-  property var probe: Qt.createQmlObject("import Quickshell.Io; Process { property alias out: collector.text; stdout: StdioCollector { id: collector; waitForEnd: true } }", chat)
+  property var probe: Qt.createQmlObject("import Quickshell.Io; Process { id: proc; property alias out: collector.text; property bool done: false; stdout: StdioCollector { id: collector; waitForEnd: true; onStreamFinished: proc.done = true } }", chat)
   TestCase {
     id: checks; name: "HistoryImages"; when: false
-    function load() {
-      client.handleLine(JSON.stringify({type:"upload_done", requestId:"r", files:[{path: file("shot.png"), uploadId:"${OWN}", name:"shot.png", size:120, mime:"image/png"}]}))
-      client.handleLine(history)
-      client.handleLine(history)
-    }
-    function requested() {
+    ${poll}
+    function run() {
       try {
+        client.handleLine(JSON.stringify({type:"upload_done", requestId:"r", files:[{path: file("shot.png"), uploadId:"${OWN}", name:"shot.png", size:120, mime:"image/png"}]}))
+        client.handleLine(history)
+        client.handleLine(history)
+        // Fetches are asked for as the list lays out its rows.
+        settle(function() {
+          if (!row(3)) throw Error("rows not laid out")
+          if (note(0, "from-mac.png") !== "loading preview…") throw Error("loading note " + note(0, "from-mac.png"))
+          if (find(row(1), "attachmentThumb").length !== 1) throw Error("own upload not a local thumbnail")
+        })
         var list = fetches()
         if (list.length !== 3) throw Error("fetches " + JSON.stringify(list))
         var mac = fetchOf("from-mac.png")[0]
@@ -122,14 +134,14 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
         client.handleLine(JSON.stringify({type:"attachment_cached", requestId: mac.requestId, uploadId:"${ID}", name:"from-mac.png", path: file("from-mac.png"), mime:"image/png"}))
         client.handleLine(JSON.stringify({type:"attachment_error", requestId: fetchOf("gone.webp")[0].requestId, uploadId:"${GONE}", name:"gone.webp", code:"not_found"}))
         client.handleLine(JSON.stringify({type:"attachment_error", requestId: fetchOf("flaky.jpg")[0].requestId, uploadId:"${FLAKY}", name:"flaky.jpg", code:"network"}))
-      } catch (e) { console.log("QML_FAIL: " + e); Qt.quit() }
-    }
-    function shown() {
-      try {
-        var thumbs = find(row(0), "attachmentThumb")
-        if (thumbs.length !== 1) throw Error("thumbnail " + thumbs.length)
-        var image = find(thumbs[0], "attachmentThumbImage")[0]
-        if (image.status !== Image.Ready || image.sourceSize.width !== 240) throw Error("thumbnail image " + image.status)
+        // The cached file decodes asynchronously.
+        var thumbs = []
+        settle(function() {
+          thumbs = find(row(0), "attachmentThumb")
+          if (thumbs.length !== 1) throw Error("thumbnail " + thumbs.length)
+          var image = find(thumbs[0], "attachmentThumbImage")[0]
+          if (image.status !== Image.Ready || image.sourceSize.width !== 240) throw Error("thumbnail image " + image.status)
+        })
         find(thumbs[0], "attachmentThumbHit")[0].clicked(null)
         if (!client.viewerImage || client.viewerImage.path !== file("from-mac.png")) throw Error("viewer " + JSON.stringify(client.viewerImage))
         client.closeImage()
@@ -144,23 +156,23 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
         var pdf = fetchOf("report.pdf")
         if (pdf.length !== 1 || pdf[0].uploadId !== "${ID}") throw Error("open did not fetch " + JSON.stringify(pdf))
         client.handleLine(JSON.stringify({type:"attachment_cached", requestId: pdf[0].requestId, uploadId:"${ID}", name:"report.pdf", path: file("report.pdf"), mime:"application/pdf"}))
-      } catch (e) { console.log("QML_FAIL: " + e); Qt.quit() }
-    }
-    function opened() {
-      probe.command = ["cat", file("opened")]
-      probe.running = true
-    }
-    function verify() {
-      if (probe.out !== file("report.pdf")) console.log("QML_FAIL: opened " + JSON.stringify(probe.out))
-      else console.log("QML_PASS")
+        // The open command is a process that writes what it was given to "opened".
+        var opened = ""
+        until(function() {
+          probe.done = false
+          probe.command = ["cat", file("opened")]
+          probe.running = true
+          until(function() { return probe.done }, 10000, "cat finishes")
+          opened = probe.out
+          return opened !== ""
+        }, 10000, "the open command ran")
+        if (opened !== file("report.pdf")) throw Error("opened " + JSON.stringify(opened))
+        console.log("QML_PASS")
+      } catch (e) { console.log("QML_FAIL: " + e) }
       Qt.quit()
     }
   }
-  Timer { interval: 150; running: true; onTriggered: checks.load() }
-  Timer { interval: 600; running: true; onTriggered: checks.requested() }
-  Timer { interval: 1100; running: true; onTriggered: checks.shown() }
-  Timer { interval: 1700; running: true; onTriggered: checks.opened() }
-  Timer { interval: 2100; running: true; onTriggered: checks.verify() }
+  Timer { interval: 150; running: true; onTriggered: checks.run() }
   `, {files: {
     'shot.png': png(),
     'from-mac.png': png(6, 4),

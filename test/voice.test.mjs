@@ -10,6 +10,8 @@ import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { ModelManager, SPEC } from '../voice/model.mjs';
 import { Transcriber } from '../voice/transcriber.mjs';
+import { loadRuntime } from '../voice/runtime.mjs';
+import { SCALE } from './composer-harness.test.mjs';
 
 async function scratch(t) {
   const dir = await mkdtemp(join(process.env.VOICE_TEST_ROOT || tmpdir(), 'voice-test-'));
@@ -321,7 +323,7 @@ ShellRoot {
   let output = '';
   child.stdout.on('data', b => output += b);
   child.stderr.on('data', b => output += b);
-  const timer = setTimeout(() => child.kill('SIGTERM'), 15000);
+  const timer = setTimeout(() => child.kill('SIGTERM'), 15000 * SCALE);
   const code = await new Promise(resolve => child.on('close', resolve));
   clearTimeout(timer);
   assert.equal(code, 0, output);
@@ -333,6 +335,14 @@ test('real model transcribes a shipped WAV (optional)', { timeout: 120000 }, asy
   const manager = new ModelManager();
   const status = await manager.status();
   if (status.state !== 'installed') return t.skip('Parakeet not downloaded; use node voice/model.mjs download.');
+  // The speech runtime is optional too. Skip only when it is installed nowhere; one that is there
+  // but does not load fails with the loader's reason (the worker would only say runtime_missing).
+  try {
+    loadRuntime();
+  } catch (error) {
+    if (/is not installed in/.test(error.detail)) return t.skip('Speech runtime not installed; Settings → Voice → Enable voice.');
+    assert.fail(`the speech runtime is installed but does not load: ${error.detail}`);
+  }
   const files = await readdir(join(status.path, 'test_wavs'));
   const events = [];
   const worker = new Transcriber({ emit: e => events.push(e) });

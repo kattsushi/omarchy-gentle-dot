@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 test('notifications: hidden/visible replies, replay, asks, outages, disable, persistence and click', async t => {
   await qml(t, `
@@ -23,7 +23,16 @@ test('notifications: hidden/visible replies, replay, asks, outages, disable, per
     id: checks; when: false
     function frame(msg) { client.handleLine(JSON.stringify(msg)) }
     function reply(id, extra) { frame(Object.assign({type: "message_done", messageId: id, text: "**Hello** [world](https://example.org)\\n" + "x".repeat(180)}, extra || {})) }
-    function count(n) { wait(150); if (client.recorded.length !== n) throw Error("notification count: expected " + n + ", got " + client.recorded.length + "; last=" + client.notifier.lastKind + "; outage=" + client.notifier.outage + "; ready=" + client.notifier.hadReady) }
+    ${poll}
+    // Each notification is a recorder process: wait until n have reported, then a little longer
+    // so that an extra one would show up too. Every later count is exact, so a stray
+    // notification fails the next one at the latest.
+    function count(n) {
+      var wrong = function() { return Error("notification count: expected " + n + ", got " + client.recorded.length + "; last=" + client.notifier.lastKind + "; outage=" + client.notifier.outage + "; ready=" + client.notifier.hadReady) }
+      try { until(function() { return client.recorded.length >= n }) } catch (e) { throw wrong() }
+      wait(150)
+      if (client.recorded.length !== n) throw wrong()
+    }
     function run() {
       try {
         compare(client.notificationsEnabled, true)
@@ -97,5 +106,5 @@ test('notifications: hidden/visible replies, replay, asks, outages, disable, per
   Timer { interval: 1; running: true; onTriggered: checks.run() }
   Timer { id: longWait; interval: 10300; onTriggered: checks.afterOutage() }
   Timer { id: disabledWait; interval: 10300; onTriggered: checks.afterDisabled() }
-  `, { timeout: 30000, files: { record: '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2))); console.log("default");\n' } });
+  `, { timeout: 60000, files: { record: '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2))); console.log("default");\n' } });
 });

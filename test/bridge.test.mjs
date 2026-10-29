@@ -18,9 +18,16 @@ after(() => rm(STATE_HOME, { recursive: true, force: true }));
 // answers POST /upload like the daemon (raw body, Bearer token, X-File-Name, X-Upload-Id);
 // every request is recorded with its headers and body. `download` answers GET requests like
 // GET /upload/<uploadId>/<name> (S14.7) and may write the response itself.
+// Other local processes may probe any new listening port (dev-server detectors send `GET /`):
+// a request that neither targets /upload nor carries a token is not the bridge's and is not recorded.
 async function fakeDaemon(onConnection, { upload, download } = {}) {
   const uploads = [];
   const http = createServer((req, res) => {
+    if (!req.url.startsWith("/upload") && req.headers.authorization === undefined) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
     if (req.method === "GET" && download) {
       const record = { method: req.method, url: req.url, headers: req.headers };
       uploads.push(record);

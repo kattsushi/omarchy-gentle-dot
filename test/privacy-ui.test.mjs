@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 // Panel.qml needs the real bar and layer shell, so its header is checked from the source: every
 // place it shows connection details goes through the service's masking, and it reports when its
@@ -80,7 +80,7 @@ test('privacy: settings masked by default, rows keep OS/online, toggling reveals
   TestCase {
     id: checks; when: false
     function eq(actual, expected, what) { if (actual !== expected) throw Error((what || "") + " expected " + JSON.stringify(expected) + ", got " + JSON.stringify(actual)) }
-    function check(ok, what) { if (!ok) throw Error("check failed: " + what) }
+    ${poll}
     ${helpers}
     function run() {
       try {
@@ -105,6 +105,8 @@ test('privacy: settings masked by default, rows keep OS/online, toggling reveals
         hostMask.selectAll(); eq(hostMask.selectedText, "••••••••")
         resultField.selectAll(); eq(resultField.selectedText, "wss://••••••••/ws")
         // Device rows: names, DNS names and IPs masked; OS and online state visible.
+        // The list creates its rows when it lays out.
+        until(function() { return rows(peers).length >= 2 }, 10000, "device rows")
         var list = rows(peers)
         eq(list.length, 2)
         var first = screen(list[0]), second = screen(list[1])
@@ -119,13 +121,13 @@ test('privacy: settings masked by default, rows keep OS/online, toggling reveals
         check(text.indexOf("Testing wss://••••••••/ws…") >= 0, text)
         check(text.indexOf("Cannot resolve ••••••••. Check the host name.") >= 0, text)
         // Picking a device while masked stores its real address and still shows the mask.
-        mouseClick(list[1])
+        press(list[1])
         eq(settings.host, "pixel-seven.tailnet-example.ts.net")
         eq(settings.candidateUrl, "wss://pixel-seven.tailnet-example.ts.net/ws")
         eq(hostMask.text, "••••••••")
         hidesAll(settings, "picked")
         // The eye reveals everything; nothing is saved.
-        mouseClick(eye)
+        press(eye)
         eq(client.privacyMasked, false)
         eq(eye.iconText, "󰈈")
         eq(client.headerTitle, "Gentle Dot · studio-mac.tailnet-example.ts.net")
@@ -141,7 +143,7 @@ test('privacy: settings masked by default, rows keep OS/online, toggling reveals
         hostField.selectAll()
         keyClick("1"); keyClick("0"); keyClick("."); keyClick("0"); keyClick("."); keyClick("0"); keyClick("."); keyClick("5")
         eq(settings.host, "10.0.0.5")
-        mouseClick(eye)
+        press(eye)
         eq(client.privacyMasked, true)
         eq(settings.host, "10.0.0.5")
         eq(settings.candidateUrl, "wss://10.0.0.5/ws")

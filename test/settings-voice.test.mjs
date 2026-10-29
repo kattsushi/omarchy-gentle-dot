@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { qml } from './composer-harness.test.mjs';
+import { poll, qml } from './composer-harness.test.mjs';
 
 // Fake `node` commands for Voice.qml: they answer model.mjs and setup.mjs like the real CLIs do,
 // without npm, a download or a recorder.
@@ -43,7 +43,6 @@ const files = {
 
 const helpers = `
     function eq(actual, expected, what) { if (actual !== expected) throw Error((what || "") + " expected " + JSON.stringify(expected) + ", got " + JSON.stringify(actual)) }
-    function check(ok, what) { if (!ok) throw Error("check failed: " + what) }
     function shown(item, out) {
       out = out || []
       if (!item || item.visible === false) return out
@@ -56,7 +55,15 @@ const helpers = `
     function has(text, what) { var s = screen(); if (s.indexOf(text) < 0) throw Error((what || "") + ": missing " + JSON.stringify(text) + " in\\n" + s) }
     function lacks(text, what) { var s = screen(); if (s.indexOf(text) >= 0) throw Error((what || "") + ": unexpected " + JSON.stringify(text) + " in\\n" + s) }
     function path(name) { return String(Qt.resolvedUrl(name)).replace(/^file:\\/\\//, "") }
-    function idle() { tryVerify(function() { return !client.voice.setupBusy }, 5000, "setup still busy") }`;
+    function state() {
+      var v = client.voice
+      return "runtime=" + v.runtimeState + " model=" + v.modelState + " recorder=" + v.recorderState + " setupBusy=" + v.setupBusy
+        + " modelBusy=" + v.modelBusy + " step=" + v.setupStep + " error=" + JSON.stringify(v.error)
+    }
+    ${poll}
+    function idle() { until(function() { return !client.voice.setupBusy }, 10000, "setup still busy: " + state()) }
+    // A click on Enable voice starts setup.mjs at once.
+    function enableClicked(button) { press(button); check(client.voice.setupBusy, "Enable voice did not start the setup: " + state()) }`;
 
 test('Settings → Voice: Enable voice installs and downloads with progress, errors, retry and cancel', async t => {
   await qml(t, `
@@ -76,7 +83,9 @@ test('Settings → Voice: Enable voice installs and downloads with progress, err
       try {
         var voice = client.voice
         // The status of a fresh install, from setup.mjs status and model.mjs status.
-        tryVerify(function() { return voice.runtimeState === "missing" && voice.recorderState === "missing" && voice.modelState === "missing" }, 5000, "status")
+        until(function() { return voice.runtimeState === "missing" && voice.recorderState === "missing" && voice.modelState === "missing" }, 10000, "status")
+        // Both status commands have finished (Enable voice and the mic wait for them).
+        until(function() { return !voice.setupBusy && !voice.modelBusy }, 10000, "status commands still running")
         has("Speech runtime (sherpa-onnx-node 2.0.1) · not installed")
         has("Parakeet v3 · missing")
         has("Recorder · missing. Install pw-record (PipeWire) or parec (pulseaudio-utils) to record voice.")
@@ -110,7 +119,7 @@ test('Settings → Voice: Enable voice installs and downloads with progress, err
 
         // A failure: its message, the state it left, and a Retry.
         client.nodePath = path("node-fail")
-        mouseClick(enable)
+        enableClicked(enable)
         idle()
         has("Installing sherpa-onnx-node 2.0.1 failed (npm exit 1): npm error 404 Not Found")
         eq(enable.text, "Retry")
@@ -118,22 +127,22 @@ test('Settings → Voice: Enable voice installs and downloads with progress, err
 
         // Cancel: the setup process gets SIGTERM and reports it.
         client.nodePath = path("node-slow")
-        mouseClick(enable)
-        tryVerify(function() { return voice.setupStep === "runtime" }, 5000, "slow setup started")
+        enableClicked(enable)
+        until(function() { return voice.setupStep === "runtime" }, 10000, "slow setup started")
         has("Installing the speech runtime…")
-        mouseClick(findChild(settings, "cancelSetup"))
+        press(findChild(settings, "cancelSetup"))
         idle()
         has("Voice setup cancelled.")
         eq(enable.text, "Enable voice")
 
         // Success: runtime, model and recorder all ready.
         client.nodePath = path("node-ok")
-        mouseClick(enable)
+        enableClicked(enable)
         idle()
-        eq(voice.runtimeState, "installed")
-        eq(voice.modelState, "installed")
-        eq(voice.recorderState, "found")
-        eq(voice.error, "")
+        eq(voice.runtimeState, "installed", state())
+        eq(voice.modelState, "installed", state())
+        eq(voice.recorderState, "found", state())
+        eq(voice.error, "", state())
         check(!enable.visible, "Enable voice hidden when ready")
         has("Speech runtime (sherpa-onnx-node 2.0.1) · installed")
         has("Recorder · pw-record")
