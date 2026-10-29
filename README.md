@@ -42,7 +42,7 @@ back as described.
 | Chat, streaming replies, history, Markdown, code highlighting | Yes | |
 | The assistant's questions, attachments you send, notifications, voice, avatar | Yes | |
 | Action lines with a generic icon per kind (memory, files, shell, web…) | Yes | |
-| Rich activity: per-integration icons (Slack, Linear, Gmail, Notion, Atlassian, Discord, RDD review, MCP) and expandable arguments/output | | `source`, `tool`, `detail`, `output` on activities |
+| Rich activity: per-integration icons (Slack, Linear, Gmail, Notion, Atlassian, Discord, RDD review, MCP) and expandable arguments/output, formatted per tool | | `source`, `tool`, `detail`, `output` on activities |
 | Model reasoning in a **Thinking…** section | | `reasoning_delta`, `reasoning` on replies and history |
 | Code whitespace kept in replies loaded from history | Kept for replies streamed during the current connection | The daemon stops collapsing whitespace inside code |
 | Message times | Remembered locally for messages this client saw live | `at` on messages and history |
@@ -325,6 +325,18 @@ daemon that sends the optional `source` field; older daemons fall back to `kind`
 Arguments, outputs and reasoning need the newer daemon too (see
 [Requires Gentle Dot](#requires-gentle-dot)). Missing fields
 are harmless; reasoning appears only when received, in a closed **Thinking…** section.
+
+An expanded action shows its arguments and result formatted per tool instead of raw JSON:
+commands as highlighted bash with their output in a terminal block, memory searches as the
+query and a compact list of notes, saved notes as title/type/topic and their first lines, file
+tools as the path (edits with a small diff, reads highlighted by file type), web tools as the
+query or URL, helpers as agent/label/task, and connectors as `key: value` rows with
+pretty-printed JSON results. Code, output and paths have a copy icon. The daemon cuts these
+previews (200 characters of arguments, 2000 of output), sometimes inside JSON: whatever still
+parses is shown, a cut value ends in `…`, and a cut result list says **+N more…**;
+`[REDACTED]` and `[TRUNCATED]` stay as the daemon sent them. This needs the `tool`, `detail`
+and `output` fields of the newer daemon; with an older bridge or daemon an action shows its raw
+text.
 
 Completed replies and history split into Markdown prose and fenced code. The bridge
 uses highlight.js with inline colors compatible with Qt RichText; unknown languages
@@ -622,6 +634,7 @@ checkout does not trigger the shell's auto-reload.
 
 - `bridge/bridge.mjs`: WebSocket (protocol v1) ↔ newline-delimited JSON on stdio; says hello with the token, reconnects with backoff, stops on a rejected token or protocol; uploads attachments and downloads stored ones into the private cache.
 - `bridge/render.mjs`, `bridge/highlighter.mjs`: splits replies into Markdown and code and highlights the code with the bundled highlight.js (`third_party/highlight.js`, no `node_modules` needed).
+- `bridge/activity-view.mjs`: turns an activity's argument/result previews into a per-tool view (code, terminal output, result list, fields, path), tolerant of cut JSON; rendered by `ActivityDetail.qml`.
 - `Client.qml`: the plugin service: one bridge, the conversation model, pending questions, settings persistence, IPC.
 - `Panel.qml`, `Composer.qml`, `ChatView.qml`, `MessageBubble.qml`, `AttachmentChip.qml`, `ImageViewer.qml`, `DropOverlay.qml`, `AskCard.qml`, `SettingsView.qml`, `Tailnet.qml`: the UI.
 - `bridge/times.mjs`: remembered message times (the hashed store and the history reconciliation), unit-tested with node:test and through the bridge.

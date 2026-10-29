@@ -10,6 +10,9 @@ Rectangle {
   property string code: ""
   property string lang: ""
   property string html: ""
+  // Header text and code size; action details use a terminal label and the caption size.
+  property string label: lang || "code"
+  property int fontPixelSize: Style.font.body
   readonly property color muted: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.72)
   property bool expanded: false
   property string copyState: "Copy"
@@ -25,7 +28,7 @@ Rectangle {
   function copy() {
     if (!clipboard.running) { clipboard.command = root.clipboardCommand; clipboard.running = true }
   }
-  FontMetrics { id: metrics; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: Style.font.body }
+  FontMetrics { id: metrics; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: root.fontPixelSize }
   Process {
     id: clipboard
     stdinEnabled: true
@@ -42,7 +45,7 @@ Rectangle {
       height: copyAction.height
       Text {
         anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-        text: root.lang || "code"
+        text: root.label
         color: root.muted
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
@@ -79,7 +82,7 @@ Rectangle {
           text: root.html ? "<pre style=\"margin:0; white-space:pre\">" + root.html + "</pre>" : root.code
           color: Commons.Color.foreground
           font.family: "JetBrainsMono Nerd Font"
-          font.pixelSize: Style.font.body
+          font.pixelSize: root.fontPixelSize
         }
       }
       Rectangle {

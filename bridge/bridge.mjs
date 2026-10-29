@@ -7,7 +7,8 @@
 // stdin:  one client message per line (send, abort, ui_response, get_history, ...), sent as is.
 //         The bridge says hello itself, with the token read from --token-file on every connect.
 // stdout: one daemon message per line, with final/history assistant segments (render.mjs),
-//         raw text retained (stream whitespace preferred for old daemons), `at` on live
+//         a per-tool `view` of each live/history/earlier activity's detail and output
+//         (activity-view.mjs), raw text and raw activity fields retained (stream whitespace preferred for old daemons), `at` on live
 //         user_message/message_done and on history the bridge has seen before when the daemon
 //         sends none (times.mjs, kept in $XDG_STATE_HOME/omarchy-gentle-dot), plus bridge lines:
 //         {"type":"bridge","state":"connecting"|"open"|"reconnecting"|"fatal", ...}
@@ -44,6 +45,7 @@ import { randomBytes } from "node:crypto";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { ATTACHMENT_LIMITS, downloadUrl, mimeFor, uploadEndpoint, validStoredName, validUploadId } from "./attachments.mjs";
+import { enrich } from "./activity-view.mjs";
 import { privateDir } from "./private-dir.mjs";
 import { renderer } from "./render.mjs";
 import { messageTimes, openTimeStore, timesFile } from "./times.mjs";
@@ -342,7 +344,7 @@ function main() {
       try {
         const message = JSON.parse(text);
         if (message && message.type === "ready") attempt = 0;
-        emit(stamped(render(message)));
+        emit(stamped(enrich(render(message))));
       } catch {
         emit({ type: "bridge_error", code: "bad_daemon_message", message: text.slice(0, 200) });
       }

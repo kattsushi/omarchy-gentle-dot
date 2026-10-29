@@ -40,6 +40,9 @@ Column {
       required property var modelData
       property bool detailsOpen: false
       readonly property bool hasDetails: !!(modelData.detail || modelData.output)
+      // The bridge's per-tool view (S21); older bridges send none and keep the raw text below.
+      readonly property var view: modelData.view || null
+      readonly property bool hasView: !!(view && (view.detail || view.output))
       width: root.width
       implicitHeight: content.implicitHeight
       Rectangle {
@@ -96,10 +99,22 @@ Column {
             font.pixelSize: Style.font.caption
           }
         }
+        Loader {
+          width: parent.width
+          active: row.detailsOpen && row.hasView && !!row.view.detail
+          visible: active
+          sourceComponent: ActivityDetail { objectName: "activityDetailView"; view: row.view.detail; muted: root.muted }
+        }
+        Loader {
+          width: parent.width
+          active: row.detailsOpen && row.hasView && !!row.view.output
+          visible: active
+          sourceComponent: ActivityDetail { objectName: "activityOutputView"; view: row.view.output; muted: root.muted }
+        }
         TextEdit {
           objectName: "activityDetail"
           width: parent.width
-          visible: row.detailsOpen && text !== ""
+          visible: row.detailsOpen && !row.hasView && text !== ""
           text: String(row.modelData.detail || "")
           textFormat: TextEdit.PlainText
           readOnly: true
@@ -112,7 +127,7 @@ Column {
         TextEdit {
           objectName: "activityOutput"
           width: parent.width
-          visible: row.detailsOpen && text !== ""
+          visible: row.detailsOpen && !row.hasView && text !== ""
           text: String(row.modelData.output || "")
           textFormat: TextEdit.PlainText
           readOnly: true

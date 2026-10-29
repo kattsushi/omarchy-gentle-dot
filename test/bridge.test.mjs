@@ -290,6 +290,42 @@ test("enriches final/history code safely and preserves streamed whitespace", asy
   assert.equal(bridge.stderr(), "");
 });
 
+test("adds a per-tool view to live, history and earlier activities, keeping the raw fields", async (t) => {
+  const shell = { id: "s", kind: "run", title: "Ran a command", status: "done", tool: "bash", source: "shell",
+    detail: '{"command":"ls -d ~/x","timeout":30}', output: "\u001b[32mx\u001b[0m\n" };
+  const memory = { id: "m", kind: "memory", title: "Checked my notes", status: "done", tool: "mem_search", source: "engram",
+    detail: '{"query":"gentle"}', output: '[{"title":"One","type":"bugfix","project":"p"},{"title":"Tw' };
+  const old = { id: "o", kind: "read", title: "Read a file", status: "done" };
+  const daemon = await fakeDaemon((conn) => conn.socket.once("message", () => {
+    conn.socket.send(JSON.stringify({ type: "activity", messageId: "a", activity: shell }));
+    conn.socket.send(JSON.stringify({ type: "earlier", before: "a", hasEarlier: true, messages: [{ id: "e", role: "assistant", text: "Earlier", activities: [memory] }] }));
+    conn.socket.send(JSON.stringify({ type: "history", messages: [{ id: "u", role: "user", text: "hi" }, { id: "a", role: "assistant", text: "Done", activities: [shell, memory, old] }] }));
+  }));
+  t.after(daemon.close);
+  const bridge = runBridge(["--url", daemon.url, "--token-file", await tokenFile()]);
+  t.after(() => bridge.child.kill());
+  const history = await bridge.waitFor((line) => line.type === "history");
+  const live = bridge.lines.find((line) => line.type === "activity");
+  const earlier = bridge.lines.find((line) => line.type === "earlier");
+  const { view: liveView, ...liveRaw } = live.activity;
+  assert.deepEqual(liveRaw, shell);
+  assert.equal(liveView.detail.type, "code");
+  assert.equal(liveView.detail.code, "ls -d ~/x");
+  assert.match(liveView.detail.html, /<span style="color:#[a-fA-F0-9]{6}">/);
+  assert.deepEqual(liveView.detail.extra, [{ key: "timeout", value: "30" }]);
+  assert.deepEqual(liveView.output, { type: "terminal", text: "x" });
+  const [historyShell, historyMemory, historyOld] = history.messages[1].activities;
+  assert.deepEqual(historyShell, live.activity);
+  assert.deepEqual(historyMemory.view.detail, { type: "fields", items: [{ key: "query", value: "gentle" }] });
+  assert.deepEqual(historyMemory.view.output, { type: "list", items: [{ title: "One", meta: "bugfix · p" }], more: 1, cut: true });
+  assert.equal(historyMemory.output, memory.output);
+  assert.deepEqual(historyOld, { ...old, view: { detail: null, output: null } });
+  assert.equal(history.messages[0].activities, undefined);
+  assert.deepEqual(earlier.messages[0].activities[0], historyMemory);
+  assert.equal(earlier.messages[0].text, "Earlier");
+  assert.equal(bridge.stderr(), "");
+});
+
 // `omarchy plugin add` only clones the repository: the bridge must run with no node_modules.
 // The copy holds every file git would publish (tracked or new, not ignored), outside the repo.
 test("runs from a clean copy without node_modules and still highlights code", async (t) => {
