@@ -65,25 +65,31 @@ back as described.
 ## Requirements
 
 - Omarchy 4 (the Omarchy shell and its plugins).
-- Node.js 22 or later on `PATH` (it runs the plugin's small WebSocket bridge). Nothing to install
-  with npm or pnpm for chat: the code highlighter is bundled.
+- Node.js 22 or newer on `PATH`; it runs the plugin's small WebSocket bridge. Without it the panel
+  says so and how to install it (`omarchy pkg add nodejs` or mise).
 - A running Gentle Dot daemon (see [Requires Gentle Dot](#requires-gentle-dot)).
-- `wl-clipboard` (`wl-copy`/`wl-paste`) for copying and pasting, and a Nerd Font (Omarchy ships
-  JetBrainsMono Nerd Font) for the icons.
-- Optional: PipeWire's `pw-record` and the `sherpa-onnx-node` package for voice; `pw-play` for
-  notification sounds; [Tailscale](https://tailscale.com) on both machines for a remote daemon.
+- For voice: PipeWire's `pw-record` (or `parec`). Settings → Voice installs the rest.
 
-No Docker, no WebKit, no system services.
+Optional: [Tailscale](https://tailscale.com) on both machines for a remote daemon. Omarchy
+already ships what else the panel uses (`wl-clipboard`, a Nerd Font, `pw-play`). No Docker, no
+WebKit, no system services, nothing to build.
 
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/kattsushi/omarchy-gentle-dot.git
-omarchy plugin enable omarchy-gentle-dot
+omarchy plugin add https://github.com/kattsushi/omarchy-gentle-dot.git --enable
 ```
 
-Plugins land disabled so you can read the code first; `omarchy plugin add … --enable` enables it
-right away. The bar icon appears in the right section; move it with `omarchy bar move`.
+The bar icon appears in the right section; move it with `omarchy bar move`. That is all chat
+needs. Two optional steps, both from the panel's Settings (gear button):
+
+- **Voice**: Settings → Voice → **Enable voice**. See [Voice (optional)](#voice-optional).
+- **Keyboard shortcut**: Settings → Shortcut → **Copy setup**, then paste it as described in
+  [Keyboard shortcut](#keyboard-shortcut).
+
+Omarchy's installer only clones the plugin (it never runs plugin code), so these steps happen on
+first use instead. Without `--enable` the plugin lands disabled so you can read the code first;
+`omarchy plugin enable omarchy-gentle-dot` enables it later.
 
 From a local checkout instead:
 
@@ -97,7 +103,10 @@ omarchy plugin enable omarchy-gentle-dot
 
 ### Keyboard shortcut
 
-`SUPER + ALT + D` shows or hides the panel. Copy [`hypr/gentle-dot.lua`](hypr/gentle-dot.lua) to `~/.config/hypr/gentle-dot.lua` and add this line to `~/.config/hypr/hyprland.lua`:
+`SUPER + ALT + D` shows or hides the panel. The plugin never edits your Hyprland config, so the
+binding is one paste away: Settings → Shortcut shows whether it is set up, and **Copy setup** puts
+[`hypr/gentle-dot.lua`](hypr/gentle-dot.lua) on the clipboard. Save it as
+`~/.config/hypr/gentle-dot.lua` and add this line to `~/.config/hypr/hyprland.lua`:
 
 ```lua
 require("hypr.gentle-dot")
@@ -109,21 +118,23 @@ The snippet unbinds `SUPER + ALT + D` first, so it replaces the binding the Gent
 omarchy-shell shell toggle omarchy-gentle-dot '{}'
 ```
 
+Settings detects the binding with `hyprctl binds -j`: a bind that runs that command, or a Lua bind
+described as "Gentle Dot" (as the snippet does).
+
 ### Voice (optional)
 
-Dictation needs the `sherpa-onnx-node` package (about 35 MB with its native libraries) in the
-plugin folder, then the speech model (487 MB), downloaded from the panel:
+Settings → Voice → **Enable voice** does it in one step, with progress and a Cancel:
 
-```sh
-cd ~/.config/omarchy/plugins/omarchy-gentle-dot
-pnpm install --prod --config.node-linker=hoisted
-```
+1. installs the speech runtime, `sherpa-onnx-node` 2.0.1 (about 35 MB with its native libraries),
+   with the npm that comes with Node.js, into `~/.local/share/omarchy-gentle-dot/runtime/`, and
+   checks that it loads. It never writes into the plugin folder, so `omarchy plugin update` and
+   `omarchy plugin validate` never see a `node_modules` there;
+2. downloads the speech model (487 MB, checksum verified);
+3. checks for a recorder and says what to install if `pw-record` and `parec` are both missing.
 
-Then open **Settings → Voice → Download** in the panel. `--prod` skips the test-only packages;
-`--config.node-linker=hoisted` writes plain folders instead of pnpm's usual symlinks, because
-Omarchy refuses a plugin folder that contains symlinks (`omarchy plugin update` would roll the
-update back). `find node_modules -type l` should print nothing. Without the package, the mic
-says "Voice unavailable: run pnpm install in the plugin directory".
+If a step fails, the error is shown and the button becomes **Retry**. From a terminal:
+`node voice/setup.mjs status|enable`. Until it is done, the mic opens Settings → Voice and says
+"Voice needs a one-time setup: Settings → Voice → Enable voice."
 
 ### Update
 
@@ -147,7 +158,7 @@ Then remove what the plugin created outside its folder:
 - its data and caches:
 
   ```sh
-  rm -rf ~/.local/share/omarchy-gentle-dot   # the voice model
+  rm -rf ~/.local/share/omarchy-gentle-dot   # the voice runtime and model
   rm -rf ~/.local/state/omarchy-gentle-dot   # remembered message times
   rm -rf ~/.config/gentle-dot/remotes        # tokens of remote daemons
   rm -rf "$XDG_RUNTIME_DIR/omarchy-gentle-dot"   # pasted/dropped files and downloads (cleared at logout anyway)
@@ -189,11 +200,11 @@ Press the microphone icon at the right edge of the message field (󰍬), speak, 
 
 - **Private**: speech is transcribed on this machine by NVIDIA Parakeet TDT 0.6B v3 (int8, 25 languages including Spanish) through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), on the CPU. Audio never leaves the machine; the daemon only receives the text, as a normal message.
 - **Two modes** (Settings → Voice → *Send when I stop*): off (default) puts the transcript in the composer to edit and send; on sends it as soon as you stop.
-- **The model is optional**: Settings → Voice → **Download** fetches 487 MB (checksum verified) into `~/.local/share/omarchy-gentle-dot/models/`; **Remove** deletes it. Until it is there, the mic opens that section.
+- **Optional, one step**: Settings → Voice → **Enable voice** installs the speech runtime into `~/.local/share/omarchy-gentle-dot/runtime/` and downloads the model, 487 MB (checksum verified), into `~/.local/share/omarchy-gentle-dot/models/`; **Remove model** deletes the model. Until both are there, the mic opens that section. See [Voice (optional)](#voice-optional).
 - Capture uses PipeWire's `pw-record` (falls back to `parec`), 16 kHz mono, up to 5 minutes per recording.
-- Needs the optional `sherpa-onnx-node` package: see [Voice (optional)](#voice-optional).
+- The runtime is loaded from `~/.local/share/omarchy-gentle-dot/runtime/` first, then from the plugin's own `node_modules` (a development checkout after `pnpm install`).
 
-From a terminal: `node voice/model.mjs status|download|verify|remove`.
+From a terminal: `node voice/setup.mjs status|enable`, `node voice/model.mjs status|download|verify|remove`.
 
 **Model integrity.** Every model file is pinned by size and SHA-256. Opening the panel only checks that each file exists with the expected size; `node voice/model.mjs check` also hashes every file (about 670 MB, under a second when the files are cached) and reports `installed` or `damaged` with the file names. If the recognizer fails to load, the plugin runs this check once and, if a file does not match, shows "The voice model is damaged (…). Download it again in Settings → Voice." In Settings → Voice, **Download again** removes the damaged files and downloads the model again (`node voice/model.mjs redownload`). Downloads check every file's hash before installing.
 
@@ -601,7 +612,7 @@ $Q statusLabel                              # the composer's status label: {text
 ## Development
 
 ```sh
-pnpm install     # test-only packages (ws) and the optional voice runtime
+pnpm install     # test-only packages (ws), and a voice runtime used when Enable voice installed none
 pnpm test        # fake-daemon bridge tests, offscreen QML tests, voice tests
 ```
 
@@ -617,7 +628,7 @@ checkout does not trigger the shell's auto-reload.
 - `bridge/time-format.mjs`, `bridge/attachments.mjs`, `privacy.mjs`: plain ECMAScript shared by QML and the bridge (timestamps; attachment limits, types, Markdown images, stored-file ids and names; masking for screen sharing), unit-tested with node:test.
 - `Avatar.qml`, `avatar/mood.mjs`: the composer's avatar; `mood.mjs` holds the state machine (chat state to mood, mood to expression), the eye, pupil and moustache geometry and the moustache gestures (which one per mood or reaction, and their keyframes), unit-tested with node:test.
 - `status.mjs`: the composer's status label (connection, questions, voice, uploads, running activity and agent phase to a few words and a tone), unit-tested with node:test.
-- `voice/model.mjs`, `voice/transcriber.mjs`, `Voice.qml`: the optional speech model and on-device transcription.
+- `voice/runtime.mjs`, `voice/setup.mjs`, `voice/model.mjs`, `voice/transcriber.mjs`, `Voice.qml`: the optional speech runtime (installed with npm outside the plugin folder), Enable voice, the speech model and on-device transcription.
 - `Notifier.qml`: service-owned notification policy and independent libnotify senders. Tests inject a fake command; no desktop notifications or live-daemon sends.
 
 ## License
@@ -628,7 +639,8 @@ It bundles or uses third-party work under its own terms, listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md):
 
 - **highlight.js** 11.12.0 (BSD-3-Clause), bundled in `third_party/highlight.js`.
-- **sherpa-onnx-node** (Apache-2.0), an optional dependency installed only for voice.
+- **sherpa-onnx-node** (Apache-2.0), installed only by Settings → Voice → Enable voice, into
+  `~/.local/share/omarchy-gentle-dot/runtime/`, never shipped in this repository.
 - **NVIDIA Parakeet TDT 0.6B v3** speech model (CC-BY-4.0), downloaded on demand from the
   sherpa-onnx releases, never shipped in this repository.
 - The **rose icon** (`assets/rose-dualtone-136.png`) is the author's own artwork, from the

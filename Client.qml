@@ -481,6 +481,12 @@ Item {
   property bool ready: false
   property string fatalReason: ""
   property string fatalMessage: ""
+  // The bridge needs Node.js 22+. A missing or older Node stops the panel with this message
+  // (fatalReason node_missing or node_too_old) instead of a silent failure.
+  readonly property int nodeMinMajor: 22
+  readonly property string nodeMessage: "Gentle Dot needs Node.js 22 or newer. Install it (e.g. `omarchy pkg add nodejs` or mise) and reopen the panel."
+  // The nodePath that last passed the version check; a failed one is checked again on Retry.
+  property string nodeVerified: ""
   property string agentState: ""
   property string model: ""
 
@@ -815,7 +821,62 @@ Item {
     fatalMessage = ""
     ready = false
     connection = "connecting"
+    if (nodeVerified === nodePath) launchBridge()
+    else if (!nodeCheck.running) {
+      nodeCheck.path = nodePath
+      nodeCheck.launched = false
+      nodeCheck.command = [nodePath || "node", "--version"]
+      nodeCheck.running = true
+    }
+  }
+
+  function launchBridge() {
+    bridge.launched = false
     bridge.running = true
+  }
+
+  // exitCode 127: not found, by a shim or because the Process could not start it at all.
+  function nodeChecked(path, exitCode, version) {
+    // The settings changed while checking: check the new one.
+    if (path !== nodePath) { start(); return }
+    if (connection !== "connecting") return
+    var match = /^v(\d+)\./.exec(String(version || "").trim())
+    if (exitCode !== 0 || !match) nodeFailed("node_missing")
+    else if (Number(match[1]) < nodeMinMajor) {
+      console.warn("omarchy-gentle-dot: " + (path || "node") + " is " + String(version).trim() + "; the bridge needs Node.js " + nodeMinMajor + "+")
+      nodeFailed("node_too_old")
+    } else {
+      nodeVerified = path
+      launchBridge()
+    }
+  }
+
+  function nodeFailed(reason) {
+    nodeVerified = ""
+    ready = false
+    fatalReason = reason
+    fatalMessage = nodeMessage
+    connection = "fatal"
+  }
+
+  function bridgeEnded(exitCode) {
+    ready = false
+    finishUpload()
+    forgetFetches(["loading"], ["network"])
+    if (stopping) {
+      stopping = false
+      connection = "stopped"
+    } else if (exitCode === 127) {
+      nodeFailed("node_missing")
+    } else if (connection !== "fatal") {
+      fatalReason = "bridge_exited"
+      fatalMessage = "The bridge exited with code " + exitCode + "."
+      connection = "fatal"
+    }
+    if (restartPending) {
+      restartPending = false
+      start()
+    }
   }
 
   function restart() {
@@ -1073,22 +1134,26 @@ Item {
       onRead: function(line) { console.warn("omarchy-gentle-dot bridge:", line) }
     }
 
+    // Quickshell emits no exited() when the command cannot start (nodePath not found):
+    // running just turns false without started().
+    property bool launched: false
+    onStarted: launched = true
+    onRunningChanged: if (!running && !launched) client.bridgeEnded(127)
+    onExited: function(exitCode) { client.bridgeEnded(exitCode) }
+  }
+
+  // `node --version` before the bridge starts (S19.2).
+  Process {
+    id: nodeCheck
+    property string path: ""
+    property bool launched: false
+    stdout: StdioCollector { id: nodeVersion; waitForEnd: true }
+    onStarted: launched = true
+    onRunningChanged: if (!running && !launched) client.nodeChecked(path, 127, "")
     onExited: function(exitCode) {
-      client.ready = false
-      client.finishUpload()
-      client.forgetFetches(["loading"], ["network"])
-      if (client.stopping) {
-        client.stopping = false
-        client.connection = "stopped"
-      } else if (client.connection !== "fatal") {
-        client.fatalReason = "bridge_exited"
-        client.fatalMessage = "The bridge exited with code " + exitCode + "."
-        client.connection = "fatal"
-      }
-      if (client.restartPending) {
-        client.restartPending = false
-        client.start()
-      }
+      var checked = path
+      // Let stdout settle before reading the version.
+      Qt.callLater(function() { client.nodeChecked(checked, exitCode, nodeVersion.text) })
     }
   }
 
@@ -1205,7 +1270,9 @@ Item {
       return JSON.stringify({model: client.voice.modelState, path: client.voice.modelPath,
         state: client.voice.state, seconds: client.voice.seconds, error: client.voice.error,
         transcript: client.voice.lastTranscript, draft: client.draft, sendOnStop: client.voiceSendOnStop,
-        modelBusy: client.voice.modelBusy, basePath: client.voice.basePath})
+        modelBusy: client.voice.modelBusy, basePath: client.voice.basePath,
+        runtime: client.voice.runtimeState, runtimeSource: client.voice.runtimeSource,
+        recorder: client.voice.recorderState, setupBusy: client.voice.setupBusy, ready: client.voice.ready})
     }
     function voiceTranscribeFile(path: string): string { return client.voice.transcribeFile(path) }
     function voiceRefresh(): string { return client.voice.manage("status") ? "checking" : "busy" }
@@ -1289,6 +1356,7 @@ Item {
 
   Component.onDestruction: {
     stopping = true
+    nodeCheck.running = false
     bridge.running = false
     tester.running = false
   }

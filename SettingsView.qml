@@ -22,6 +22,14 @@ FocusScope {
   // The URL of the last test started from this view, so "Use this connection" applies exactly that one.
   property string testedUrl: ""
   property bool failed: false
+  // Keyboard shortcut (S19.3): detected from `hyprctl binds -j`, never written by the plugin.
+  property string hyprctlCommand: "hyprctl"
+  property string clipboardCommand: "wl-copy"
+  readonly property string shortcutSnippet: decodeURIComponent(String(Qt.resolvedUrl("hypr/gentle-dot.lua")).replace(/^file:\/\//, ""))
+  property string shortcutState: "checking"   // checking | found | missing | unknown
+  property string shortcutKeys: "SUPER + ALT + D"
+  property string shortcutFeedback: ""
+  property bool shortcutFailed: false
   readonly property string host: hostField.text.trim()
   readonly property string port: portField.text.trim()
   readonly property string candidateUrl: !remoteMode ? client.localUrl : advanced ? customField.text.trim()
@@ -56,6 +64,75 @@ FocusScope {
   }
 
   function result(text, error) { feedback = text; failed = error }
+
+  // A bind toggles this panel when it runs the toggle command (hyprlang exec) or, for Lua binds
+  // that hyprctl shows only as "__lua", carries the description hypr/gentle-dot.lua gives it.
+  function shortcutFrom(json) {
+    var binds
+    try { binds = JSON.parse(json) } catch (e) { return {state: "unknown", keys: "SUPER + ALT + D"} }
+    if (!Array.isArray(binds)) return {state: "unknown", keys: "SUPER + ALT + D"}
+    for (var i = 0; i < binds.length; i++) {
+      var bind = binds[i] || {}
+      if (bind.description === "Gentle Dot" || /omarchy-shell\s+shell\s+toggle\s+omarchy-gentle-dot\b/.test(String(bind.arg || ""))) {
+        var mods = []
+        var names = [[64, "SUPER"], [4, "CTRL"], [8, "ALT"], [1, "SHIFT"]]
+        for (var j = 0; j < names.length; j++) if (bind.modmask & names[j][0]) mods.push(names[j][1])
+        return {state: "found", keys: mods.concat([String(bind.key || "").toUpperCase()]).join(" + ")}
+      }
+    }
+    return {state: "missing", keys: "SUPER + ALT + D"}
+  }
+
+  function checkShortcut() {
+    if (shortcutProbe.running) return
+    shortcutProbe.launched = false
+    shortcutProbe.command = [hyprctlCommand, "binds", "-j"]
+    shortcutProbe.running = true
+  }
+
+  function shortcutChecked(exitCode, text) {
+    var found = exitCode === 0 ? shortcutFrom(text) : {state: "unknown", keys: "SUPER + ALT + D"}
+    shortcutState = found.state
+    shortcutKeys = found.keys
+  }
+
+  // The snippet file (which starts with its one-line instruction) to the clipboard.
+  function copyShortcut() {
+    if (shortcutCopy.running) return
+    shortcutFeedback = ""
+    shortcutFailed = false
+    shortcutCopy.launched = false
+    shortcutCopy.command = ["sh", "-c", "\"$1\" < \"$2\"", "sh", clipboardCommand, shortcutSnippet]
+    shortcutCopy.running = true
+  }
+
+  function shortcutCopied(ok) {
+    shortcutFailed = !ok
+    shortcutFeedback = ok ? 'Copied. Save it as ~/.config/hypr/gentle-dot.lua and add require("hypr.gentle-dot") to ~/.config/hypr/hyprland.lua.'
+      : "Could not copy: install wl-clipboard, or copy " + shortcutSnippet + " by hand."
+  }
+
+  Process {
+    id: shortcutProbe
+    property bool launched: false
+    property string output: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: shortcutProbe.output = text
+    }
+    onStarted: { launched = true; output = "" }
+    // No exited() when hyprctl cannot start (not on Hyprland).
+    onRunningChanged: if (!running && !launched) root.shortcutChecked(127, "")
+    onExited: function(exitCode) { Qt.callLater(function() { root.shortcutChecked(exitCode, shortcutProbe.output) }) }
+  }
+
+  Process {
+    id: shortcutCopy
+    property bool launched: false
+    onStarted: launched = true
+    onRunningChanged: if (!running && !launched) root.shortcutCopied(false)
+    onExited: function(exitCode) { root.shortcutCopied(exitCode === 0) }
+  }
 
   // A message as shown: masked with the service's known names plus the host being edited.
   function shown(text) {
@@ -141,6 +218,8 @@ FocusScope {
   onVisibleChanged: {
     if (visible) {
       load()
+      checkShortcut()
+      shortcutFeedback = ""
       if (client.settingsSection === "voice") {
         flick.contentY = 0
         client.settingsSection = ""
@@ -148,7 +227,10 @@ FocusScope {
     }
     else tokenField.text = ""
   }
-  Component.onCompleted: load()
+  Component.onCompleted: {
+    load()
+    checkShortcut()
+  }
   Keys.onEscapePressed: function(event) {
     if (client.voice.active) client.voice.cancel()
     else client.view = "chat"
@@ -236,10 +318,25 @@ FocusScope {
       Label { text: "Voice"; font.bold: true }
       Label {
         width: parent.width
+        text: "Speech runtime (sherpa-onnx-node 2.0.1) · " + ({installed: "installed", missing: "not installed"}[root.client.voice.runtimeState]
+          || "checking") + (root.client.voice.runtimeState === "installed" && root.client.voice.runtimeSource === "plugin" ? " (plugin node_modules)" : "")
+      }
+      Label {
+        width: parent.width
         text: "Parakeet v3 · " + root.client.voice.modelState + (root.client.voice.modelBusy
           ? " · " + (root.client.voice.received / 1000000).toFixed(1) + " / 487.2 MB" : "")
       }
-      Label { width: parent.width; text: "Private, on-device dictation. Only text is sent. Optional download: 487 MB (~640 MiB extracted)." }
+      Label {
+        width: parent.width
+        text: "Recorder · " + (root.client.voice.recorderState === "found" ? root.client.voice.recorder
+          : root.client.voice.recorderState === "missing" ? "missing. " + root.client.voice.recorderMessage : "checking")
+        color: root.client.voice.recorderState === "missing" ? root.urgent : root.foreground
+      }
+      Label {
+        width: parent.width
+        text: root.client.voice.ready ? "Voice is ready." : "Private, on-device dictation; only text is sent. Enable voice installs the speech runtime"
+          + " (about 35 MB) in ~/.local/share/omarchy-gentle-dot and downloads the model (487 MB, ~640 MiB extracted)."
+      }
       Label {
         width: parent.width
         visible: root.client.voice.modelState === "damaged"
@@ -247,38 +344,52 @@ FocusScope {
           + ". Download again replaces them."
         color: root.urgent
       }
+      Label {
+        width: parent.width
+        visible: root.client.voice.setupBusy && text !== ""
+        text: {
+          var voice = root.client.voice
+          if (voice.setupStep === "runtime") return "Installing the speech runtime…"
+          if (voice.setupStep === "model") return voice.modelState === "verifying" ? "Verifying the model…"
+            : "Downloading the model… " + (voice.received / 1000000).toFixed(1) + " / 487.2 MB"
+          if (voice.setupStep === "recorder") return "Checking the recorder…"
+          return ""
+        }
+      }
       Row {
         spacing: Style.space(8)
         Button {
-          text: "Download model"
+          objectName: "enableVoice"
+          text: root.client.voice.setupFailed ? "Retry" : "Enable voice"
           bordered: true
-          visible: root.client.voice.modelState !== "damaged"
-          enabled: !root.client.voice.modelBusy && !root.client.voice.active && root.client.voice.modelState !== "installed"
-          onClicked: root.client.voice.manage("download")
+          visible: !root.client.voice.ready && !root.client.voice.setupBusy && root.client.voice.modelState !== "damaged"
+          enabled: !root.client.voice.modelBusy && !root.client.voice.active && root.client.voice.runtimeState !== "checking"
+          onClicked: root.client.voice.enable()
         }
         Button {
           text: "Download again"
           bordered: true
           visible: root.client.voice.modelState === "damaged"
-          enabled: !root.client.voice.modelBusy && !root.client.voice.active
+          enabled: !root.client.voice.modelBusy && !root.client.voice.setupBusy && !root.client.voice.active
           onClicked: root.client.voice.redownload()
         }
         Button {
-          visible: root.client.voice.modelBusy
-          text: "Cancel download"
+          objectName: "cancelSetup"
+          visible: root.client.voice.modelBusy || root.client.voice.setupBusy
+          text: "Cancel"
           bordered: true
-          onClicked: root.client.voice.cancelDownload()
+          onClicked: root.client.voice.setupBusy ? root.client.voice.cancelSetup() : root.client.voice.cancelDownload()
         }
         Button {
-          text: "Remove"
+          text: "Remove model"
           bordered: true
-          enabled: !root.client.voice.modelBusy && !root.client.voice.active
+          enabled: !root.client.voice.modelBusy && !root.client.voice.setupBusy && !root.client.voice.active
             && (root.client.voice.modelState === "installed" || root.client.voice.modelState === "damaged")
           onClicked: root.client.voice.manage("remove")
         }
       }
       Rectangle {
-        visible: root.client.voice.modelBusy
+        visible: root.client.voice.modelBusy || root.client.voice.setupStep === "model"
         width: parent.width
         height: Style.space(4)
         color: Qt.darker(root.foreground, 2)
@@ -296,8 +407,26 @@ FocusScope {
         onClicked: if (!root.client.saveVoiceSendOnStop(!root.client.voiceSendOnStop)) root.result("Could not save the voice preference.", true)
       }
       Label { width: parent.width; text: root.client.voiceSendOnStop ? "The transcript is sent immediately as a normal chat message." : "Default: append the transcript to the draft to edit before sending." }
-      Label { width: parent.width; text: "Requires pnpm install in the plugin directory and pw-record (or parec). Text chat works without voice dependencies." }
       Label { width: parent.width; visible: text !== ""; text: root.client.voice.error; color: root.urgent }
+      Label { text: "Shortcut"; font.bold: true }
+      Label {
+        objectName: "shortcutState"
+        width: parent.width
+        text: "Keyboard shortcut: " + root.shortcutKeys + " (" + ({found: "set up", missing: "not set up", unknown: "could not check"}[root.shortcutState]
+          || "checking") + ")"
+      }
+      Button {
+        objectName: "copyShortcut"
+        text: "Copy setup"
+        bordered: true
+        enabled: !shortcutCopy.running
+        onClicked: root.copyShortcut()
+      }
+      Label {
+        width: parent.width
+        text: root.shortcutFeedback || "Shows or hides this panel. The plugin never edits your Hyprland config: Copy setup puts the snippet on the clipboard for you to add."
+        color: root.shortcutFailed ? root.urgent : root.foreground
+      }
       Row {
         spacing: Style.space(8)
         Label { anchors.verticalCenter: parent.verticalCenter; text: "Connection"; font.bold: true }

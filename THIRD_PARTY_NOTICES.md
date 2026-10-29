@@ -18,8 +18,8 @@ license.
 
 ### sherpa-onnx-node 2.0.1
 
-- Used for: on-device voice transcription. Installed only when you run `pnpm install` in the
-  plugin folder; chat works without it.
+- Used for: on-device voice transcription. Installed only when you press Settings → Voice → Enable
+  voice (into `~/.local/share/omarchy-gentle-dot/runtime/`); chat works without it.
 - Upstream: https://github.com/k2-fsa/sherpa-onnx (npm `sherpa-onnx-node` and its per-platform
   package, such as `sherpa-onnx-linux-x64`).
 - License: Apache-2.0. Its platform packages ship native libraries (including ONNX Runtime) under

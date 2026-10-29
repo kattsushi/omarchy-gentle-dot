@@ -20,10 +20,20 @@ Item {
   property bool sendAfterStop: false
   property var pendingCommand: null
   readonly property bool active: state !== "idle"
+  // Settings → Voice → Enable voice (setup.mjs): the speech runtime, the model and a recorder.
+  property string runtimeState: "checking"   // checking | installed | missing
+  property string runtimeSource: ""          // runtime ($XDG_DATA_HOME) | plugin (a checkout's node_modules)
+  property string recorderState: "checking"  // checking | found | missing
+  property string recorder: ""
+  property string recorderMessage: ""
+  property bool setupBusy: false
+  property string setupStep: ""              // runtime | model | recorder while setupBusy
+  property bool setupFailed: false
+  readonly property bool ready: runtimeState === "installed" && modelState === "installed"
   signal transcriptReady(string text, bool sendNow)
 
   function manage(command) {
-    if (modelBusy || active) return false
+    if (modelBusy || setupBusy || active) return false
     error = ""
     if (command === "remove" || command === "redownload") worker.running = false
     modelBusy = true
@@ -33,6 +43,58 @@ Item {
   }
 
   function cancelDownload() { if (modelBusy) manager.signal(15) }
+
+  function runSetup(command) {
+    setupBusy = true
+    setupStep = ""
+    setup.launched = false
+    setup.command = [client.nodePath || "node", basePath + "setup.mjs", command]
+    setup.running = true
+  }
+
+  // Runtime and recorder state; the model's comes from manage("status").
+  function checkSetup() {
+    if (setupBusy) return false
+    runSetup("status")
+    return true
+  }
+
+  // Installs the runtime if it does not load yet, downloads the model, checks the recorder.
+  function enable() {
+    if (setupBusy || modelBusy || active) return false
+    error = ""
+    setupFailed = false
+    received = 0
+    runSetup("enable")
+    return true
+  }
+
+  function cancelSetup() { if (setupBusy) setup.signal(15) }
+
+  function handleSetup(line) {
+    var event
+    try { event = JSON.parse(line) } catch (e) { return }
+    switch (event.type) {
+      case "runtime":
+        runtimeState = event.state === "installed" ? "installed" : "missing"
+        runtimeSource = String(event.source || "")
+        break
+      case "recorder":
+        recorderState = event.state === "found" ? "found" : "missing"
+        recorder = String(event.command || "")
+        recorderMessage = String(event.message || "")
+        break
+      case "setup":
+        if (event.step !== "done") setupStep = String(event.step || "")
+        break
+      case "error":
+        error = String(event.message || event.code)
+        setupFailed = event.code !== "cancelled"
+        break
+      default:
+        handleModel(line)
+    }
+  }
 
   // A damaged model must be removed before it can be downloaded again.
   function redownload() { return manage("redownload") }
@@ -63,7 +125,7 @@ Item {
 
   function start() {
     if (active || modelBusy) return false
-    if (modelState !== "installed") {
+    if (modelState !== "installed" || runtimeState === "missing") {
       client.settingsSection = "voice"
       client.view = "settings"
       return false
@@ -121,6 +183,7 @@ Item {
         error = String(event.message || event.code)
         // The worker hashed the files after the recognizer failed to load.
         if (event.code === "model_damaged") modelState = "damaged"
+        if (event.code === "runtime_missing") runtimeState = "missing"
         state = "idle"
         rms = 0
         break
@@ -137,6 +200,26 @@ Item {
   }
 
   Process {
+    id: setup
+    // Quickshell emits no exited() when Node cannot be started.
+    property bool launched: false
+    stdout: SplitParser { onRead: function(line) { voice.handleSetup(line) } }
+    onStarted: launched = true
+    onRunningChanged: if (!running && !launched && voice.setupBusy) finish(127)
+    onExited: function(code) { finish(code) }
+    function finish(code) {
+      voice.setupBusy = false
+      voice.setupStep = ""
+      if (code !== 0 && !voice.error) {
+        voice.error = code === 127 ? voice.client.nodeMessage : "Voice setup failed (exit " + code + ")."
+        voice.setupFailed = true
+      }
+      if (voice.runtimeState === "checking") voice.runtimeState = "missing"
+      if (voice.recorderState === "checking") voice.recorderState = "missing"
+    }
+  }
+
+  Process {
     id: worker
     stdinEnabled: true
     onStarted: {
@@ -147,11 +230,14 @@ Item {
     // Native sherpa-onnx may log resampling diagnostics to stderr; never treat
     // those as protocol frames or send them to the daemon.
     onExited: function(code) {
-      if (voice.active) voice.error = "Voice worker stopped (exit " + code + "). Check pnpm install."
+      if (voice.active) voice.error = "Voice worker stopped (exit " + code + ")."
       voice.state = "idle"
       voice.rms = 0
     }
   }
 
-  Component.onCompleted: Qt.callLater(function() { voice.manage("status") })
+  Component.onCompleted: Qt.callLater(function() {
+    voice.manage("status")
+    voice.checkSetup()
+  })
 }

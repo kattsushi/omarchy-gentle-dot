@@ -7,6 +7,7 @@ import { availableParallelism } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ModelManager } from './model.mjs';
+import { loadRuntime, RUNTIME_MISSING } from './runtime.mjs';
 
 const RATE = 16000;
 export const MAX_SAMPLES = RATE * 300;
@@ -16,6 +17,7 @@ export const RECORDER_COMMANDS = [
   ['pw-record', '--rate', '16000', '--channels', '1', '--format', 'f32', '-'],
   ['parec', '--raw', '--format=float32le', '--rate=16000', '--channels=1', '--latency-msec=40']
 ];
+export const RECORDER_MISSING = 'Install pw-record (PipeWire) or parec (pulseaudio-utils) to record voice.';
 
 export async function record() {
   for (const [command, ...args] of RECORDER_COMMANDS) {
@@ -27,13 +29,13 @@ export async function record() {
       if (error.code !== 'ENOENT') throw fail('recorder_error', error.message);
     }
   }
-  throw fail('recorder_missing', 'Install pw-record (PipeWire) or parec (pulseaudio-utils) to record voice.');
+  throw fail('recorder_missing', RECORDER_MISSING);
 }
 
 export class Transcriber {
-  constructor({ model = new ModelManager(), loadRuntime = () => import('sherpa-onnx-node'), record: recorder = record,
+  constructor({ model = new ModelManager(), loadRuntime: load = async () => loadRuntime().module, record: recorder = record,
     emit = event => process.stdout.write(JSON.stringify(event) + '\n') } = {}) {
-    Object.assign(this, { model, loadRuntime, record: recorder, emit });
+    Object.assign(this, { model, loadRuntime: load, record: recorder, emit });
     this.state = 'idle';
     this.generation = 0;
   }
@@ -44,7 +46,7 @@ export class Transcriber {
     if (status.state !== 'installed') throw fail('model_missing', 'Download the optional Parakeet model in Settings → Voice.');
     if (!this.runtime) {
       try { const mod = await this.loadRuntime(); this.runtime = mod.default || mod; }
-      catch { throw fail('runtime_missing', 'Voice unavailable: run pnpm install in the plugin directory (sherpa-onnx-node 2.0.1).'); }
+      catch { throw fail('runtime_missing', RUNTIME_MISSING); }
     }
     if (!this.engine) {
       const config = {
