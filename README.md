@@ -11,7 +11,7 @@
 
 A bar icon and a chat panel drawn by the Omarchy shell itself (Quickshell/QML), with your theme's colors and fonts. No WebKitGTK window, so none of its flicker on NVIDIA + Hyprland.
 
-![The Gentle Dot chat panel: a remote daemon, action lines, a highlighted code block and the avatar next to the composer](assets/preview.png)
+![The Gentle Dot chat panel: a remote daemon, action lines, a highlighted code block and the avatar next to the composer](preview.png)
 
 ## Requires Gentle Dot
 
@@ -645,7 +645,7 @@ It bundles or uses third-party work under its own terms, listed in
   sherpa-onnx releases, never shipped in this repository.
 - The **rose icon** (`assets/rose-dualtone-136.png`) is the author's own artwork, from the
   Gentleman theme for Omarchy.
-- The **preview images** (`assets/preview.png`, `assets/preview-avatar.png`) are the author's
+- The **preview images** (`preview.png`, `assets/preview-avatar.png`) are the author's
   offscreen renders of the plugin's own QML with fictional content.
 
 Gentle Dot, Gentle AI and Omarchy are separate projects by their own authors.

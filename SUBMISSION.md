@@ -4,11 +4,11 @@ https://github.com/kattsushi/omarchy-gentle-dot
 
 ### Category
 
-AI
+Productivity
 
 ### Tags
 
-ai, chat, gentle-dot, quickshell, voice
+AI, Bar, Quickshell
 
 ### Suggest a missing tag
 
