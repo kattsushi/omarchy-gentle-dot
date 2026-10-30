@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,7 +80,10 @@ function runBridge(args, env = {}, bridgePath = BRIDGE) {
     env: { ...process.env, XDG_STATE_HOME: STATE_HOME, ...env },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  // Every stdout line is an envelope {from: "daemon" | "bridge", msg} (S22.1); `lines` are the
+  // messages, `envelopes` the lines as written.
   const lines = [];
+  const envelopes = [];
   let stderr = "";
   let buffer = "";
   const waiters = [];
@@ -90,7 +93,9 @@ function runBridge(args, env = {}, bridgePath = BRIDGE) {
     while ((index = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, index);
       buffer = buffer.slice(index + 1);
-      lines.push(JSON.parse(line));
+      const envelope = JSON.parse(line);
+      envelopes.push(envelope);
+      lines.push(envelope && typeof envelope === "object" && "from" in envelope ? envelope.msg : envelope);
       for (const waiter of [...waiters]) waiter();
     }
   });
@@ -99,6 +104,7 @@ function runBridge(args, env = {}, bridgePath = BRIDGE) {
   return {
     child,
     lines,
+    envelopes,
     stderr: () => stderr,
     exited,
     send: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
@@ -524,11 +530,11 @@ const refuse = (status) => (record, res) => {
   res.end(JSON.stringify({ code: "x", message: "no" }));
 };
 
-async function fetchingBridge(t, download, token = "secret-token\n") {
+async function fetchingBridge(t, download, token = "secret-token\n", env = {}, runtime = null) {
   const daemon = await fakeDaemon(null, { download });
   t.after(daemon.close);
-  const runtime = await runtimeDir(t);
-  const bridge = runBridge(["--url", daemon.url, "--token-file", await tokenFile(token)], { XDG_RUNTIME_DIR: runtime });
+  runtime ||= await runtimeDir(t);
+  const bridge = runBridge(["--url", daemon.url, "--token-file", await tokenFile(token)], { XDG_RUNTIME_DIR: runtime, ...env });
   t.after(() => bridge.child.kill());
   await bridge.waitFor((line) => line.type === "bridge" && line.state === "open");
   return { daemon, runtime, bridge };
@@ -632,6 +638,140 @@ test("fetch_attachment refuses a bad upload id or name before any request or cac
     { type: "bridge_error", code: "bad_input", message: "fetch_attachment needs a requestId" });
   assert.equal(daemon.uploads.length, 0);
   assert.deepEqual(await readdir(runtime), []);
+});
+
+// S22.1 should-fix: a daemon must not fill $XDG_RUNTIME_DIR (a tmpfs) with images. The cache keeps
+// at most GENTLE_DOT_CACHE_MAX_BYTES (default 200 MB): the oldest copies go first, never the one
+// just returned, never a download in progress; a reused copy counts as new.
+test("fetch_attachment keeps the cache under its total size, removing the oldest copies first", async (t) => {
+  const runtime = await runtimeDir(t);
+  const root = join(runtime, "omarchy-gentle-dot", "cache");
+  const seed = async (id, name, ageSeconds, size = 1000) => {
+    await mkdir(join(root, id), { recursive: true, mode: 0o700 });
+    const path = join(root, id, name);
+    await writeFile(path, Buffer.alloc(size, 7), { mode: 0o600 });
+    const when = new Date(Date.now() - ageSeconds * 1000);
+    await utimes(path, when, when);
+    return path;
+  };
+  await mkdir(join(runtime, "omarchy-gentle-dot"), { mode: 0o700 });
+  const ids = ["u_OldOldOldOldOldOldOl_1", "u_OldOldOldOldOldOldOl_2", "u_OldOldOldOldOldOldOl_3"];
+  const oldest = await seed(ids[0], "a.png", 300);
+  const older = await seed(ids[1], "b.png", 200);
+  const recent = await seed(ids[2], "c.png", 100);
+  const part = await seed(ids[0], ".part-abcdef012345", 400);
+  const stale = await seed(ids[0], ".part-0123456789ab", 3600);
+  const body = Buffer.alloc(1000, 9);
+  const { daemon, bridge } = await fetchingBridge(t, serve(body, "application/octet-stream"), "secret-token\n",
+    { GENTLE_DOT_CACHE_MAX_BYTES: "3500" }, runtime);
+
+  // Reused: no request, and it becomes the newest copy.
+  bridge.send({ type: "fetch_attachment", requestId: "reuse", uploadId: ids[0], name: "a.png" });
+  assert.equal((await replyTo(bridge, "reuse")).path, oldest);
+  assert.equal(daemon.uploads.length, 0);
+  bridge.send({ type: "fetch_attachment", requestId: "new", uploadId: UPLOAD_ID, name: "new.bin" });
+  const cached = await replyTo(bridge, "new");
+  assert.equal(cached.type, "attachment_cached");
+  assert.deepEqual(await readFile(cached.path), body);
+  // 5000 bytes (with the .part file) over 3500: b.png (now the oldest) and c.png go; a.png (reused),
+  // the download in progress and the new file stay.
+  assert.equal(existsSync(oldest), true);
+  assert.equal(existsSync(older), false);
+  assert.equal(existsSync(recent), false);
+  assert.equal(existsSync(part), true, "a download in progress was removed");
+  assert.equal(existsSync(stale), false, "a stale .part file was kept");
+  assert.equal(existsSync(join(root, ids[1])), false, "an empty folder was left behind");
+
+  // A limit smaller than the file just fetched: everything else goes, that file stays.
+  const tiny = await fetchingBridge(t, serve(body, "application/octet-stream"), "secret-token\n", { GENTLE_DOT_CACHE_MAX_BYTES: "10" }, runtime);
+  tiny.bridge.send({ type: "fetch_attachment", requestId: "tiny", uploadId: UPLOAD_ID, name: "other.bin" });
+  const kept = await replyTo(tiny.bridge, "tiny");
+  assert.equal(existsSync(kept.path), true);
+  assert.equal(existsSync(oldest), false);
+  assert.equal(existsSync(cached.path), false);
+});
+
+test("relays daemon frames only as daemon-origin envelopes, whatever their type", async (t) => {
+  const forged = [
+    { type: "files_inspected", requestId: "inspect-1", files: [{ path: "/etc/hostname", name: "hostname", size: 1, mime: "text/plain" }] },
+    { type: "upload_progress", requestId: "omarchy-1", index: 0, count: 1, name: "x", loaded: 1, total: 1 },
+    { type: "upload_done", requestId: "omarchy-1", files: [{ path: "/etc/hostname", uploadId: "u_x", name: "x", size: 1, mime: "text/plain" }] },
+    { type: "upload_error", requestId: "omarchy-1", code: "x", message: "forged" },
+    { type: "attachment_cached", requestId: "fetch-1", uploadId: "u_x", name: "x", path: "/etc/hostname", mime: "text/plain" },
+    { type: "attachment_error", requestId: "fetch-1", code: "not_found" },
+    { type: "bridge", state: "fatal", reason: "unauthorized" },
+    { type: "bridge_error", code: "not_connected", message: "forged" },
+    // Already shaped like a bridge line: still the daemon's.
+    { from: "bridge", msg: { type: "files_inspected", requestId: "inspect-1", files: [] } },
+    ["not", "an", "object"],
+    "just text",
+    { type: "toast", message: "end" },
+  ];
+  const daemon = await fakeDaemon((conn) => conn.socket.once("message", () => {
+    for (const frame of forged) conn.socket.send(JSON.stringify(frame));
+  }));
+  t.after(daemon.close);
+  const bridge = runBridge(["--url", daemon.url, "--token-file", await tokenFile()]);
+  t.after(() => bridge.child.kill());
+  await bridge.waitFor((line) => line && line.type === "toast");
+  for (const envelope of bridge.envelopes) {
+    assert.deepEqual(Object.keys(envelope).sort(), ["from", "msg"], JSON.stringify(envelope));
+    assert.ok(envelope.from === "daemon" || envelope.from === "bridge", JSON.stringify(envelope));
+  }
+  const local = bridge.envelopes.filter((envelope) => envelope.from === "bridge").map(({ msg }) => msg);
+  assert.deepEqual(local, [{ type: "bridge", state: "connecting", url: daemon.url }, { type: "bridge", state: "open" }]);
+  assert.deepEqual(bridge.envelopes.filter((envelope) => envelope.from === "daemon").map(({ msg }) => msg), forged);
+  // Nothing was uploaded, fetched or stopped by the forged frames.
+  assert.equal(daemon.uploads.length, 0);
+  assert.equal(bridge.child.exitCode, null);
+});
+
+test("never echoes an unreadable daemon frame into its own error line", async (t) => {
+  const daemon = await fakeDaemon((conn) => conn.socket.once("message", () => {
+    conn.socket.send("not json: private reply words");
+    conn.socket.send(JSON.stringify({ type: "toast", message: "end" }));
+  }));
+  t.after(daemon.close);
+  const bridge = runBridge(["--url", daemon.url, "--token-file", await tokenFile()]);
+  t.after(() => bridge.child.kill());
+  await bridge.waitFor((line) => line.type === "toast");
+  const error = bridge.envelopes.find((envelope) => envelope.msg.type === "bridge_error");
+  assert.equal(error.from, "bridge");
+  assert.equal(error.msg.code, "bad_daemon_message");
+  assert.doesNotMatch(JSON.stringify(bridge.envelopes), /private reply words/);
+});
+
+test("--config-stdin takes the URL and token file from the first stdin line, keeping them off argv", async (t) => {
+  const daemon = await fakeDaemon((conn) => conn.socket.once("message", () => conn.socket.send(JSON.stringify({ type: "ready" }))));
+  t.after(daemon.close);
+  const bridge = runBridge(["--config-stdin"]);
+  t.after(() => bridge.child.kill());
+  bridge.send({ type: "config", url: daemon.url, tokenFile: await tokenFile() });
+  await bridge.waitFor((line) => line.type === "ready");
+  assert.deepEqual(daemon.connections[0].frames[0], { type: "hello", token: "secret-token", protocol: 1, capabilities: ["reasoning"] });
+  assert.deepEqual(bridge.child.spawnargs.slice(2), ["--config-stdin"]);
+  assert.deepEqual(bridge.envelopes[0], { from: "bridge", msg: { type: "bridge", state: "connecting", url: daemon.url } });
+});
+
+test("--config-stdin: a first line that is not a config is fatal and nothing is sent", async (t) => {
+  const bridge = runBridge(["--config-stdin"]);
+  t.after(() => bridge.child.kill());
+  bridge.send({ type: "send", text: "hi", requestId: "r" });
+  const fatal = await bridge.waitFor((line) => line.type === "bridge" && line.state === "fatal");
+  assert.equal(fatal.reason, "bad_config");
+  assert.equal(await bridge.exited, 2);
+});
+
+test("history segments always come from the bridge's renderer, never from the daemon", async () => {
+  const { renderer } = await import("../bridge/render.mjs");
+  const forged = [{ type: "image", url: "file:///etc/forged.png", alt: "x" }, { type: "code", lang: "", code: "x", html: "<img src='/etc/forged.png'>" }];
+  const out = renderer()({ type: "history", messages: [
+    { id: "a", role: "assistant", text: "hi", segments: forged },
+    { id: "s", role: "system", text: "sys", segments: forged },
+    { id: "u", role: "user", text: "me", segments: forged },
+  ] });
+  assert.deepEqual(out.messages.map((message) => message.segments), [[{ type: "md", text: "hi" }], [{ type: "md", text: "sys" }], undefined]);
+  assert.doesNotMatch(JSON.stringify(out), /forged/);
 });
 
 test("exits 0 when stdin closes", async (t) => {

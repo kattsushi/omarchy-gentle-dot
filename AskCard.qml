@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls as Controls
 import qs.Commons
 import qs.Ui
+import "bridge/attachments.mjs" as Attachments
 
 // A pending protocol Ask. All responses use the service's validated answer path;
 // no optimistic removal: other clients and timeouts resolve through the daemon.
@@ -22,6 +23,14 @@ FocusScope {
   property string answerError: ""
 
   implicitHeight: contents.implicitHeight + Style.space(24)
+
+  // The ask comes from the daemon: links open only when they are web links (http, https), never
+  // file:// or other schemes that start local applications (S22.1).
+  function openLink(link) {
+    if (!/^https?:\/\//i.test(String(link || ""))) return false
+    Qt.openUrlExternally(link)
+    return true
+  }
 
   function respond(payload) {
     if (!client) return
@@ -58,7 +67,9 @@ FocusScope {
     TextEdit {
       visible: text !== ""
       width: parent.width
-      text: String(card.ask.message || "")
+      objectName: "askMessage"
+      // Qt's Markdown would load images (local files included) from image syntax and HTML.
+      text: Attachments.markdownText(String(card.ask.message || ""))
       textFormat: TextEdit.MarkdownText
       readOnly: true
       selectByMouse: true
@@ -66,7 +77,7 @@ FocusScope {
       color: card.foreground
       font.family: card.fontFamily
       font.pixelSize: Style.font.body
-      onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+      onLinkActivated: function(link) { card.openLink(link) }
     }
 
     Text {

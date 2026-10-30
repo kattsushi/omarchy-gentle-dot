@@ -8,7 +8,7 @@ test('status label: ready, thinking, waiting, running command, ODD phase, back t
   Plugin.Client {
     id: client
     entrySettings: ({notifications: false, notificationSound: false})
-    notifier.commandPath: "true"
+    notifier.notifyCommand: ["true"]
     notifier.soundCommandPath: "true"
     property var sent: []
     function send(obj) { sent = sent.concat([obj]); return true }
@@ -23,7 +23,7 @@ test('status label: ready, thinking, waiting, running command, ODD phase, back t
     id: checks
     name: "StatusLabel"
     when: false
-    function frame(obj) { client.handleLine(JSON.stringify(obj)) }
+    function frame(obj) { client.handleLine(JSON.stringify({from: obj.type === "bridge" ? "bridge" : "daemon", msg: obj})) }
     function named(item, name) {
       if (item.objectName === name) return item
       for (var i = 0; i < item.children.length; i++) { var found = named(item.children[i], name); if (found) return found }

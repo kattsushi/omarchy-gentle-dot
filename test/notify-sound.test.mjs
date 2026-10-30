@@ -16,7 +16,7 @@ test('notification sounds: per kind, off switch, Do Not Disturb', async t => {
       function summon(id, payload) {}
     }
     function send(obj) { return true }
-    notifier.commandPath: Qt.resolvedUrl("record").toString().replace("file://", "")
+    notifier.notifyCommand: [Qt.resolvedUrl("record").toString().replace("file://", "")]
     notifier.soundCommandPath: Qt.resolvedUrl("record-sound").toString().replace("file://", "")
     notifier.dndPath: Qt.resolvedUrl("missing.json").toString().replace("file://", "")
     Connections {
@@ -32,7 +32,7 @@ test('notification sounds: per kind, off switch, Do Not Disturb', async t => {
   }
   TestCase {
     id: checks; when: false
-    function frame(msg) { client.handleLine(JSON.stringify(msg)) }
+    function frame(msg) { client.handleLine(JSON.stringify({from: msg.type === "bridge" ? "bridge" : "daemon", msg: msg})) }
     function reply(id) { frame({type: "message_done", messageId: id, text: "Done"}) }
     ${poll}
     // Notifications and sounds are recorder processes (a sound starts once its wake clip ends):

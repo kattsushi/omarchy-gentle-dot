@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 
@@ -37,7 +37,11 @@ export async function qml(t, body, { timeout = 30000, files = {} } = {}) {
   t.after(() => rm(dir, { recursive: true, force: true }));
   await symlink('/usr/share/omarchy/shell/Commons', join(dir, 'Commons'));
   await symlink('/usr/share/omarchy/shell/Ui', join(dir, 'Ui'));
-  for (const [name, content] of Object.entries(files)) await writeFile(join(dir, name), content, { mode: 0o700 });
+  // Names may have folders (e.g. a cached file under omarchy-gentle-dot/cache/<id>/).
+  for (const [name, content] of Object.entries(files)) {
+    await mkdir(dirname(join(dir, name)), { recursive: true });
+    await writeFile(join(dir, name), content, { mode: 0o700 });
+  }
   await writeFile(join(dir, 'shell.qml'), `
 import QtQuick
 import QtTest
@@ -61,4 +65,5 @@ ShellRoot { ${body} }
   assert.equal(code, 0, output);
   assert.match(output, /QML_PASS/, output);
   assert.doesNotMatch(output, /QML_FAIL|TypeError|ReferenceError/, output);
+  return output;
 }

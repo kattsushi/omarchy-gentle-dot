@@ -287,7 +287,8 @@ function runBridge(url, tokenPath, state) {
     buffer += chunk;
     let index;
     while ((index = buffer.indexOf("\n")) >= 0) {
-      lines.push(JSON.parse(buffer.slice(0, index)));
+      // Each line is an envelope {from, msg} (S22.1); the tests read the messages.
+      lines.push(JSON.parse(buffer.slice(0, index)).msg);
       buffer = buffer.slice(index + 1);
       for (const waiter of [...waiters]) waiter();
     }

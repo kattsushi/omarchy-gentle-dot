@@ -3,16 +3,25 @@
 // so a QML Process can talk to a local or remote daemon without QtWebSockets.
 //
 //   node bridge.mjs --url ws://127.0.0.1:4317/ws --token-file ~/.gentle-dot/token
+//   node bridge.mjs --config-stdin    (first stdin line: {"type":"config","url","tokenFile"})
+//
+// --config-stdin keeps the daemon URL (its host is private, S16) and the token file path (named
+// after the host) out of the command line, which other local accounts can read (S22.2).
 //
 // stdin:  one client message per line (send, abort, ui_response, get_history, ...), sent as is.
 //         The bridge says hello itself, with the token read from --token-file on every connect.
-// stdout: one daemon message per line, with final/history assistant segments (render.mjs),
+// stdout: one line per message, always an envelope that says where it comes from (S22.1):
+//           {"from":"daemon","msg":<daemon frame>}   relayed from the daemon, whatever its type
+//           {"from":"bridge","msg":<bridge event>}   the bridge's own state and local results
+//         A daemon frame is never written as a bridge event, so a daemon cannot forge one (a
+//         files_inspected, upload_done or attachment_cached result, or a bridge state).
+//         Daemon frames carry final/history assistant segments (render.mjs),
 //         a per-tool `view` of each live/history/earlier activity's detail and output
 //         (activity-view.mjs), raw text and raw activity fields retained (stream whitespace preferred for old daemons), `at` on live
 //         user_message/message_done and on history the bridge has seen before when the daemon
-//         sends none (times.mjs, kept in $XDG_STATE_HOME/omarchy-gentle-dot), plus bridge lines:
+//         sends none (times.mjs, kept in $XDG_STATE_HOME/omarchy-gentle-dot). Bridge events:
 //         {"type":"bridge","state":"connecting"|"open"|"reconnecting"|"fatal", ...}
-//         {"type":"bridge_error","code":"bad_input"|"not_connected"|"message_times","message":...}
+//         {"type":"bridge_error","code":"bad_input"|"not_connected"|"message_times"|"bad_daemon_message","message":...}
 // Bridge-local stdin commands (never forwarded as is):
 //   {"type":"inspect_files","requestId","paths":[...]} -> {"type":"files_inspected","requestId",
 //     "files":[{path,name,size,mime} | {path,name,error}]} (works without a connection)
@@ -24,21 +33,23 @@
 //     {"type":"upload_error","requestId","code","message"[,"index","name","status"]} and nothing is sent.
 //   {"type":"fetch_attachment","requestId","uploadId","name"} -> GET <http(s) origin of --url>/upload/
 //     <uploadId>/<encoded name> (patched daemons, S14.7) with the same Bearer token, into the private cache
-//     $XDG_RUNTIME_DIR/omarchy-gentle-dot/cache/<uploadId>/<name> (folders 0700, file 0600, at most the
+//     $XDG_RUNTIME_DIR (or /tmp)/omarchy-gentle-dot/cache/<uploadId>/<name> (folders 0700, file 0600, at most the
 //     daemon's 25 MB per file, written to a .part file and renamed). A cached copy is reused and
 //     concurrent asks share one download. Answers {"type":"attachment_cached","requestId","uploadId",
 //     "name","path","mime"} (mime from the first bytes, as for local files) or {"type":"attachment_error",
 //     "requestId","uploadId","name","code":"unauthorized"|"not_found"|"too_large"|"network"|"unsupported"}.
+//     The whole cache stays under $GENTLE_DOT_CACHE_MAX_BYTES (default 200 MB): after each download the
+//     least recently used copies are removed, never the one being returned or a download in progress.
 //     A bad id or name is refused (unsupported) before any request or path is made.
-// Exit codes: 0 when stdin closes, 2 on a fatal error (bad URL, unreadable token, rejected token
-// or protocol); anything else is retried with backoff.
+// Exit codes: 0 when stdin closes, 2 on a fatal error (bad URL or config line, unreadable token,
+// rejected token or protocol); anything else is retried with backoff.
 import {
-  closeSync, createReadStream, createWriteStream, lstatSync, openSync, readFileSync, readSync, renameSync, statSync,
-  unlinkSync,
+  closeSync, createReadStream, createWriteStream, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync,
+  renameSync, rmdirSync, statSync, unlinkSync, utimesSync,
 } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { randomBytes } from "node:crypto";
@@ -61,16 +72,23 @@ function parseArgs(argv) {
   const options = {
     url: process.env.GENTLE_DOT_URL || "ws://127.0.0.1:4317/ws",
     tokenFile: process.env.GENTLE_DOT_TOKEN_FILE || "~/.gentle-dot/token",
+    configStdin: false,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--url") options.url = argv[++i];
     else if (argv[i] === "--token-file") options.tokenFile = argv[++i];
+    else if (argv[i] === "--config-stdin") options.configStdin = true;
   }
   return options;
 }
 
-function emit(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
+// The bridge's own events and the daemon's frames, each in its envelope (S22.1).
+function emit(event) {
+  process.stdout.write(`${JSON.stringify({ from: "bridge", msg: event })}\n`);
+}
+
+function relay(frame) {
+  process.stdout.write(`${JSON.stringify({ from: "daemon", msg: frame })}\n`);
 }
 
 function fatal(fields) {
@@ -199,16 +217,22 @@ const FETCH_TIMEOUT_MS = 60000;
 
 class TooLarge extends Error {}
 
+// The same folder the panel expects cached copies in (Client.qml cacheDir).
+const cacheRoot = () => join(process.env.XDG_RUNTIME_DIR || "/tmp", "omarchy-gentle-dot", "cache");
+
 function cacheFolder(uploadId) {
-  const base = privateDir(join(process.env.XDG_RUNTIME_DIR || tmpdir(), "omarchy-gentle-dot"));
-  return privateDir(join(privateDir(join(base, "cache")), uploadId));
+  privateDir(join(process.env.XDG_RUNTIME_DIR || "/tmp", "omarchy-gentle-dot"));
+  return privateDir(join(privateDir(cacheRoot()), uploadId));
 }
 
-// A complete cached copy: one of our regular files (never a link); its type from its first bytes.
+// A complete cached copy: one of our regular files (never a link), really inside the cache
+// folder (no link along the way); its type from its first bytes.
 function cachedCopy(path, name) {
   try {
     const stats = lstatSync(path);
     if (!stats.isFile() || stats.uid !== process.getuid()) return null;
+    const root = cacheRoot();
+    if (!path.startsWith(`${root}/`) || realpathSync(path) !== join(realpathSync(root), path.slice(root.length + 1))) return null;
     const fd = openSync(path, "r");
     const head = Buffer.alloc(16);
     const read = readSync(fd, head, 0, head.length, 0);
@@ -224,6 +248,80 @@ function removeQuietly(path) {
     unlinkSync(path);
   } catch {
     // Already gone.
+  }
+}
+
+// The cache holds at most this many bytes in all (S22.1: a daemon must not fill the tmpfs).
+const CACHE_MAX_BYTES = 200 * 1024 * 1024;
+const cacheLimit = () => {
+  const value = Number(process.env.GENTLE_DOT_CACHE_MAX_BYTES);
+  return Number.isFinite(value) && value >= 0 ? value : CACHE_MAX_BYTES;
+};
+
+// A .part file this old is left over from a bridge that stopped mid-download (fetches time out
+// after a minute).
+const STALE_PART_MS = 10 * 60 * 1000;
+
+// Removes the oldest cached copies (by modification time; a reused copy is touched) until the
+// cache fits its limit. Never `keep` (the copy being returned) and never a recent .part file (a
+// download in progress); stale .part files and folders left empty go too. Links and foreign files are not ours: left alone.
+function pruneCache(keep) {
+  const root = cacheRoot();
+  const files = [];
+  let total = 0;
+  let folders;
+  try {
+    folders = readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const folder of folders) {
+    const dir = join(root, folder);
+    let names;
+    try {
+      if (!lstatSync(dir).isDirectory()) continue;
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const path = join(dir, name);
+      try {
+        const stats = lstatSync(path);
+        if (!stats.isFile() || stats.uid !== process.getuid()) continue;
+        const partial = name.startsWith(".part-");
+        if (partial && Date.now() - stats.mtimeMs > STALE_PART_MS) {
+          removeQuietly(path);
+          continue;
+        }
+        total += stats.size;
+        if (!partial && path !== keep) files.push({ path, dir, size: stats.size, mtime: stats.mtimeMs });
+      } catch {
+        // Gone meanwhile.
+      }
+    }
+  }
+  files.sort((a, b) => a.mtime - b.mtime);
+  const limit = cacheLimit();
+  for (const file of files) {
+    if (total <= limit) break;
+    removeQuietly(file.path);
+    total -= file.size;
+    try {
+      rmdirSync(file.dir);
+    } catch {
+      // Not empty.
+    }
+  }
+}
+
+// A reused copy counts as recently used.
+function touch(path) {
+  try {
+    const now = new Date();
+    utimesSync(path, now, now);
+  } catch {
+    // Not fatal: it may only be pruned earlier.
   }
 }
 
@@ -278,7 +376,9 @@ function downloadOne(address, token, uploadId, name) {
       try {
         await pipeline(response, counter, createWriteStream(part, { flags: "wx", mode: 0o600 }));
         renameSync(part, path);
-        finish(cachedCopy(path, name) || { code: "network" });
+        const copy = cachedCopy(path, name);
+        if (copy) pruneCache(path);
+        finish(copy || { code: "network" });
       } catch (error) {
         removeQuietly(part);
         request.destroy();
@@ -289,8 +389,36 @@ function downloadOne(address, token, uploadId, name) {
   });
 }
 
+// With --config-stdin, the connection comes from the first stdin line; the others are commands.
 function main() {
-  const { url, tokenFile } = parseArgs(process.argv.slice(2));
+  const options = parseArgs(process.argv.slice(2));
+  const lines = createInterface({ input: process.stdin });
+  if (!options.configStdin) {
+    run(options, lines);
+    return;
+  }
+  const early = (line) => {
+    lines.off("line", early);
+    lines.off("close", missing);
+    let config = null;
+    try {
+      config = JSON.parse(line);
+    } catch {
+      config = null;
+    }
+    if (!config || config.type !== "config" || typeof config.url !== "string" || typeof config.tokenFile !== "string") {
+      lines.close();
+      fatal({ reason: "bad_config", message: "the first stdin line must be {\"type\":\"config\",\"url\",\"tokenFile\"}" });
+      return;
+    }
+    run({ url: config.url, tokenFile: config.tokenFile }, lines);
+  };
+  const missing = () => process.exit(0);
+  lines.on("line", early);
+  lines.once("close", missing);
+}
+
+function run({ url, tokenFile }, lines) {
   if (!/^wss?:\/\//.test(url)) {
     fatal({ reason: "bad_url", message: `server URL must start with ws:// or wss://: ${url}` });
     return;
@@ -339,15 +467,19 @@ function main() {
       emit({ type: "bridge", state: "open" });
     });
 
+    // Daemon frames are only ever relayed in a daemon envelope, whatever their type. An
+    // unreadable one is reported without its text, which may be private.
     current.addEventListener("message", (event) => {
       const text = String(event.data);
+      let message;
       try {
-        const message = JSON.parse(text);
-        if (message && message.type === "ready") attempt = 0;
-        emit(stamped(enrich(render(message))));
+        message = enrich(render(JSON.parse(text)));
       } catch {
-        emit({ type: "bridge_error", code: "bad_daemon_message", message: text.slice(0, 200) });
+        emit({ type: "bridge_error", code: "bad_daemon_message", message: `unreadable daemon message (${text.length} characters)` });
+        return;
       }
+      if (message && message.type === "ready") attempt = 0;
+      relay(stamped(message));
     });
 
     current.addEventListener("close", (event) => {
@@ -412,8 +544,11 @@ function main() {
   const cacheAttachment = async (uploadId, name) => {
     const address = downloadUrl(url, uploadId, name);
     if (!address) return { code: "unsupported" };
-    const cached = cachedCopy(join(process.env.XDG_RUNTIME_DIR || tmpdir(), "omarchy-gentle-dot", "cache", uploadId, name), name);
-    if (cached) return cached;
+    const cached = cachedCopy(join(cacheRoot(), uploadId, name), name);
+    if (cached) {
+      touch(cached.path);
+      return cached;
+    }
     const token = readToken(tokenFile);
     if (!token) return { code: "unauthorized" };
     return downloadOne(address, token, uploadId, name);
@@ -464,7 +599,6 @@ function main() {
     return false;
   };
 
-  const lines = createInterface({ input: process.stdin });
   lines.on("line", (line) => {
     if (!line.trim()) return;
     let message;

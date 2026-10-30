@@ -358,12 +358,12 @@ test('avatar: the mood follows the shared service with no daemon traffic', async
         compare(avatar.mood, "thinking")
         client.agentState = "working"
         compare(avatar.mood, "focused")
-        client.handleLine(JSON.stringify({type: "message_delta", messageId: "m1", delta: "Hi"}))
+        client.handleDaemon(({type: "message_delta", messageId: "m1", delta: "Hi"}))
         compare(avatar.mood, "talking")
         client.agentState = "needs_you"
         compare(avatar.mood, "alert")
         client.agentState = "working"
-        client.handleLine(JSON.stringify({type: "message_done", messageId: "m1", text: "Hi"}))
+        client.handleDaemon(({type: "message_done", messageId: "m1", text: "Hi"}))
         compare(avatar.mood, "surprised", "a reply landed while visible")
         until(function() { return avatar.mood !== "surprised" }, 5000, "the surprise ends")
         compare(avatar.mood, "focused")
@@ -380,7 +380,7 @@ test('avatar: the mood follows the shared service with no daemon traffic', async
         compare(avatar.mood, "worried")
         client.notice = ""
         compare(avatar.mood, "idle")
-        client.handleLine(JSON.stringify({type: "message_done", messageId: "m2", text: "", error: "boom"}))
+        client.handleDaemon(({type: "message_done", messageId: "m2", text: "", error: "boom"}))
         compare(avatar.mood, "worried", "a failed reply")
         client.connection = "fatal"
         compare(avatar.mood, "sleepy")
@@ -431,7 +431,7 @@ test('avatar: each mood starts its moustache gesture', async t => {
         until(function() { return avatar.lastGesture === "twitch" }, 5000, "a twitch")
 
         // Streaming: talks, the lip moving irregularly.
-        client.handleLine(JSON.stringify({type: "message_delta", messageId: "m1", delta: "Ciao"}))
+        client.handleDaemon(({type: "message_delta", messageId: "m1", delta: "Ciao"}))
         compare(avatar.mood, "talking")
         compare(avatar.gesture, "talk")
         wait(300)
@@ -439,7 +439,7 @@ test('avatar: each mood starts its moustache gesture', async t => {
         var shape = avatar.rightMoustache
         var lifts = 0, flaps = 0
         for (var i = 0; i < 40; i++) {
-          if (i % 10 === 0) client.handleLine(JSON.stringify({type: "message_delta", messageId: "m1", delta: " bella"}))
+          if (i % 10 === 0) client.handleDaemon(({type: "message_delta", messageId: "m1", delta: " bella"}))
           wait(20)
           if (avatar.moveLift > 0.15) lifts++
           if (Math.abs(avatar.moveLflap - avatar.moveRflap) > 0.5) flaps++
@@ -450,7 +450,7 @@ test('avatar: each mood starts its moustache gesture', async t => {
         compare(avatar.gesture, "talk")
 
         // The reply finished: a satisfied twirl.
-        client.handleLine(JSON.stringify({type: "message_done", messageId: "m1", text: "Ciao bella"}))
+        client.handleDaemon(({type: "message_done", messageId: "m1", text: "Ciao bella"}))
         compare(avatar.mood, "surprised")
         compare(avatar.gesture, "listo")
         during("listo", function() { return avatar.leftMoustache.curl > 0.7 && avatar.rightMoustache.curl > 0.7 }, "listo curls both tips")
@@ -463,7 +463,7 @@ test('avatar: each mood starts its moustache gesture', async t => {
         during("cheeky", function() { return Math.abs(avatar.leftMoustache.raise - avatar.rightMoustache.raise) > 0.8 }, "cheeky")
 
         // A toast: surprise, the moustache puffs out.
-        client.handleLine(JSON.stringify({type: "toast", message: "Heads up", level: "info"}))
+        client.handleDaemon(({type: "toast", message: "Heads up", level: "info"}))
         compare(avatar.mood, "surprised")
         compare(avatar.gesture, "puff")
         during("puff", function() { return avatar.rightMoustache.puff > 0.6 }, "puffed")
@@ -471,7 +471,7 @@ test('avatar: each mood starts its moustache gesture', async t => {
 
         // An error: a dramatic droop. Mamma mia.
         client.agentState = "idle"
-        client.handleLine(JSON.stringify({type: "message_done", messageId: "m2", text: "", error: "boom"}))
+        client.handleDaemon(({type: "message_done", messageId: "m2", text: "", error: "boom"}))
         compare(avatar.mood, "worried")
         compare(avatar.gesture, "mammamia")
         during("mammamia", function() { return avatar.rightMoustache.raise < -1.4 && avatar.leftMoustache.raise < -1.4 }, "dramatic droop")
@@ -519,9 +519,9 @@ test('avatar: no moustache gesture runs while the panel is hidden', async t => {
         verify(!avatar.ticking)
         var count = avatar.gestureCount
         client.agentState = "idle"
-        client.handleLine(JSON.stringify({type: "message_delta", messageId: "m1", delta: "Hi"}))
-        client.handleLine(JSON.stringify({type: "message_done", messageId: "m1", text: "Hi"}))
-        client.handleLine(JSON.stringify({type: "toast", message: "x", level: "info"}))
+        client.handleDaemon(({type: "message_delta", messageId: "m1", delta: "Hi"}))
+        client.handleDaemon(({type: "message_done", messageId: "m1", text: "Hi"}))
+        client.handleDaemon(({type: "toast", message: "x", level: "info"}))
         client.agentState = "needs_you"
         client.agentState = "working"
         avatar.playGesture("proud")

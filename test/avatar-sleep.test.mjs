@@ -135,15 +135,15 @@ test('avatar sleep: a click wakes it instead of the happy reaction; a new messag
 
         idleFor(45)
         compare(avatar.mood, "asleep")
-        client.handleLine(JSON.stringify({type: "user_message", messageId: "u1", text: "hola"}))
+        client.handleDaemon(({type: "user_message", messageId: "u1", text: "hola"}))
         verify(!client.asleep, "a new message wakes it")
         compare(avatar.mood, "waking")
         calm()
 
         idleFor(45)
-        client.handleLine(JSON.stringify({type: "message_delta", messageId: "a1", delta: "Hi"}))
+        client.handleDaemon(({type: "message_delta", messageId: "a1", delta: "Hi"}))
         verify(!client.asleep, "a reply streaming in wakes it")
-        client.handleLine(JSON.stringify({type: "message_done", messageId: "a1", text: "Hi"}))
+        client.handleDaemon(({type: "message_done", messageId: "a1", text: "Hi"}))
         calm()
 
         idleFor(45)
@@ -161,7 +161,7 @@ test('avatar sleep: a click wakes it instead of the happy reaction; a new messag
 
         // A question while asleep: wakes it and the question shows (alert outranks waking).
         idleFor(45)
-        client.handleLine(JSON.stringify({type: "ask", ask: {requestId: "q1", method: "confirm", title: "Go?", timeoutMs: 60000}}))
+        client.handleDaemon(({type: "ask", ask: {requestId: "q1", method: "confirm", title: "Go?", timeoutMs: 60000}}))
         verify(!client.asleep)
         compare(avatar.mood, "alert")
         console.log("QML_PASS")
@@ -228,7 +228,7 @@ test('avatar sleep: counted while hidden, checked when shown; 0 never sleeps; bu
         calm()
 
         // Disconnected: its own sleepy look (one z), even when the inactivity timer says asleep.
-        client.handleLine(JSON.stringify({type: "bridge", state: "fatal", reason: "unauthorized"}))
+        client.handleBridge(({type: "bridge", state: "fatal", reason: "unauthorized"}))
         compare(avatar.mood, "sleepy")
         idleFor(45)
         verify(client.asleep)
@@ -236,14 +236,14 @@ test('avatar sleep: counted while hidden, checked when shown; 0 never sleeps; bu
         compare(avatar.look.extra, "z")
         verify(!zLetters().layer.visible, "no sleep z letters while disconnected")
         // Reconnecting is activity; the disconnected face just becomes searching (no wake reaction).
-        client.handleLine(JSON.stringify({type: "bridge", state: "connecting"}))
+        client.handleBridge(({type: "bridge", state: "connecting"}))
         verify(!client.asleep)
         compare(avatar.mood, "searching")
-        client.handleLine(JSON.stringify({type: "bridge", state: "open"}))
-        client.handleLine(JSON.stringify({type: "ready", agentState: "idle", model: "m"}))
+        client.handleBridge(({type: "bridge", state: "open"}))
+        client.handleDaemon(({type: "ready", agentState: "idle", model: "m"}))
         compare(avatar.mood, "idle")
         // A click on a disconnected avatar that also timed out is the usual happy reaction.
-        client.handleLine(JSON.stringify({type: "bridge", state: "fatal", reason: "unauthorized"}))
+        client.handleBridge(({type: "bridge", state: "fatal", reason: "unauthorized"}))
         idleFor(45)
         mouseClick(avatar)
         compare(avatar.mood, "happy")

@@ -13,7 +13,7 @@ test('notifications: hidden/visible replies, replay, asks, outages, disable, per
       function summon(id, payload) { client.opened++ }
     }
     function send(obj) { return true }
-    notifier.commandPath: Qt.resolvedUrl("record").toString().replace("file://", "")
+    notifier.notifyCommand: [Qt.resolvedUrl("record").toString().replace("file://", "")]
     Connections {
       target: client.notifier
       function onCommandOutput(line) { client.recorded = client.recorded.concat([JSON.parse(line)]) }
@@ -21,7 +21,16 @@ test('notifications: hidden/visible replies, replay, asks, outages, disable, per
   }
   TestCase {
     id: checks; when: false
-    function frame(msg) { client.handleLine(JSON.stringify(msg)) }
+    function frame(msg) { client.handleLine(JSON.stringify({from: msg.type === "bridge" ? "bridge" : "daemon", msg: msg})) }
+    // Nothing on a notification's command line (S22.2): its text arrives on stdin.
+    function shown(i) {
+      var note = client.recorded[i]
+      if (note.argv.length !== 0) throw Error("arguments on the notification command line: " + JSON.stringify(note.argv))
+      compare(note.payload.appName, "Gentle Dot")
+      compare(JSON.stringify(note.payload.actions), JSON.stringify(["default", "Open"]))
+      compare(note.payload.expireMs, 8000)
+      return note.payload
+    }
     function reply(id, extra) { frame(Object.assign({type: "message_done", messageId: id, text: "**Hello** [world](https://example.org)\\n" + "x".repeat(180)}, extra || {})) }
     ${poll}
     // Each notification is a recorder process: wait until n have reported, then a little longer
@@ -44,10 +53,8 @@ test('notifications: hidden/visible replies, replay, asks, outages, disable, per
         count(0)
         reply("fresh")
         count(1)
-        var args = client.recorded[0]
-        compare(args[args.length - 2], "Gentle Dot")
-        compare(args[args.length - 1], "Hello world " + "x".repeat(128))
-        verify(args.indexOf("--action=default=Open") >= 0)
+        compare(shown(0).summary, "Gentle Dot")
+        compare(shown(0).body, "Hello world " + "x".repeat(128))
         compare(client.opened, 1)
         reply("fresh"); reply("stopped", {stopped: true}); reply("error", {error: "oops"})
         count(1)
@@ -59,7 +66,7 @@ test('notifications: hidden/visible replies, replay, asks, outages, disable, per
         count(1)
         frame({type: "ask", ask: {requestId: "new", title: "Approve command", method: "confirm"}})
         count(2)
-        compare(client.recorded[1][client.recorded[1].length - 2], "Gentle Dot · Approve command")
+        compare(shown(1).summary, "Gentle Dot · Approve command")
         frame({type: "ask", ask: {requestId: "new", title: "Approve command", method: "confirm"}})
         count(2)
         frame({type: "bridge", state: "reconnecting"})
@@ -79,7 +86,11 @@ test('notifications: hidden/visible replies, replay, asks, outages, disable, per
         count(3)
         frame({type: "bridge", state: "open"}); frame({type: "ready"}); frame({type: "history", messages: []})
         count(4)
-        compare(client.recorded[3][client.recorded[3].length - 1], "Reconnected")
+        compare(shown(3).body, "Reconnected")
+        // The real command is the bridge's D-Bus helper, run by Node with no other argument.
+        var helper = client.notifier.defaultCommand
+        compare(helper.length, 2)
+        verify(helper[1].slice(-"/bridge/notify.mjs".length) === "/bridge/notify.mjs", helper[1])
         client.entrySettings = {serverUrl: "wss://mac.example/ws", tokenFile: "unchanged", notifications: true}
         // Keep configure from starting the real bridge; the same URL/config is already set.
         client.configured = true; client.nodePath = "node"; client.serverUrl = "wss://mac.example/ws"; client.tokenFile = "unchanged"
@@ -106,5 +117,15 @@ test('notifications: hidden/visible replies, replay, asks, outages, disable, per
   Timer { interval: 1; running: true; onTriggered: checks.run() }
   Timer { id: longWait; interval: 10300; onTriggered: checks.afterOutage() }
   Timer { id: disabledWait; interval: 10300; onTriggered: checks.afterDisabled() }
-  `, { timeout: 60000, files: { record: '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2))); console.log("default");\n' } });
+  `, { timeout: 60000, files: { record: `#!/usr/bin/env node
+// Reports its arguments and the one-line JSON payload from stdin, then "clicks" the notification.
+let input = '';
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  if (!input.includes('\\n')) return;
+  console.log(JSON.stringify({ argv: process.argv.slice(2), payload: JSON.parse(input.slice(0, input.indexOf('\\n'))) }));
+  console.log('default');
+  process.exit(0);
+});
+` } });
 });

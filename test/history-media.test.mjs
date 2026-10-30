@@ -47,14 +47,14 @@ test('history messages with `at` show their time, the daemon\'s live `at` wins o
         t0 = Date.now()
         twoDaysAgo = t0 - 2 * 86400000
         client.now = t0
-        client.handleLine(JSON.stringify({type:"history", messages:[
+        client.handleDaemon(({type:"history", messages:[
           {id:"h1", role:"user", text:"Earlier question", at: t0 - 5 * 60000},
           {id:"h2", role:"assistant", text:"Earlier answer", at: t0 - 3 * 3600000},
           {id:"h3", role:"user", text:"From an old daemon"}]}))
-        client.handleLine(JSON.stringify({type:"message_delta", messageId:"r", delta:"Hi"}))
-        client.handleLine(JSON.stringify({type:"message_done", messageId:"r", text:"Hi", at: twoDaysAgo}))
-        client.handleLine(JSON.stringify({type:"message_delta", messageId:"s", delta:"Plain"}))
-        client.handleLine(JSON.stringify({type:"message_done", messageId:"s", text:"Plain"}))
+        client.handleDaemon(({type:"message_delta", messageId:"r", delta:"Hi"}))
+        client.handleDaemon(({type:"message_done", messageId:"r", text:"Hi", at: twoDaysAgo}))
+        client.handleDaemon(({type:"message_delta", messageId:"s", delta:"Plain"}))
+        client.handleDaemon(({type:"message_done", messageId:"s", text:"Plain"}))
         // The list creates its delegates when it lays out.
         settle(function() {
           if (!row(4)) throw Error("rows not laid out")
@@ -91,6 +91,8 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
   }
   ${helpers}
   function fetches() { return client.sent.filter(function(m) { return m.type === "fetch_attachment" }) }
+  // Where the bridge caches a fetched file; the client takes no other path for it (S22.1).
+  function cached(name) { return Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-gentle-dot/cache/${ID}/" + name }
   function fetchOf(name) { return fetches().filter(function(m) { return m.name === name }) }
   function chip(index, name) {
     return find(row(index), "attachmentChip").filter(function(c) { return find(c, "chipName")[0].text === name })[0]
@@ -110,9 +112,12 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
     ${poll}
     function run() {
       try {
-        client.handleLine(JSON.stringify({type:"upload_done", requestId:"r", files:[{path: file("shot.png"), uploadId:"${OWN}", name:"shot.png", size:120, mime:"image/png"}]}))
-        client.handleLine(history)
-        client.handleLine(history)
+        client.connection = "open"; client.ready = true
+        client.attachments = [{path: file("shot.png"), name:"shot.png", size:120, mime:"image/png"}]
+        client.submitDraft()
+        client.handleBridge(({type:"upload_done", requestId: client.sent[0].requestId, files:[{path: file("shot.png"), uploadId:"${OWN}", name:"shot.png", size:120, mime:"image/png"}]}))
+        client.handleDaemon(JSON.parse(history))
+        client.handleDaemon(JSON.parse(history))
         // Fetches are asked for as the list lays out its rows.
         settle(function() {
           if (!row(3)) throw Error("rows not laid out")
@@ -131,9 +136,9 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
         var opens = find(row(0), "attachmentOpen")
         if (opens.length !== 1 || opens[0].tooltipText !== "Open report.pdf") throw Error("open buttons " + opens.length)
         if (find(row(1), "attachmentThumb").length !== 1) throw Error("own upload not a local thumbnail")
-        client.handleLine(JSON.stringify({type:"attachment_cached", requestId: mac.requestId, uploadId:"${ID}", name:"from-mac.png", path: file("from-mac.png"), mime:"image/png"}))
-        client.handleLine(JSON.stringify({type:"attachment_error", requestId: fetchOf("gone.webp")[0].requestId, uploadId:"${GONE}", name:"gone.webp", code:"not_found"}))
-        client.handleLine(JSON.stringify({type:"attachment_error", requestId: fetchOf("flaky.jpg")[0].requestId, uploadId:"${FLAKY}", name:"flaky.jpg", code:"network"}))
+        client.handleBridge(({type:"attachment_cached", requestId: mac.requestId, uploadId:"${ID}", name:"from-mac.png", path: cached("from-mac.png"), mime:"image/png"}))
+        client.handleBridge(({type:"attachment_error", requestId: fetchOf("gone.webp")[0].requestId, uploadId:"${GONE}", name:"gone.webp", code:"not_found"}))
+        client.handleBridge(({type:"attachment_error", requestId: fetchOf("flaky.jpg")[0].requestId, uploadId:"${FLAKY}", name:"flaky.jpg", code:"network"}))
         // The cached file decodes asynchronously.
         var thumbs = []
         settle(function() {
@@ -143,19 +148,19 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
           if (image.status !== Image.Ready || image.sourceSize.width !== 240) throw Error("thumbnail image " + image.status)
         })
         find(thumbs[0], "attachmentThumbHit")[0].clicked(null)
-        if (!client.viewerImage || client.viewerImage.path !== file("from-mac.png")) throw Error("viewer " + JSON.stringify(client.viewerImage))
+        if (!client.viewerImage || client.viewerImage.path !== cached("from-mac.png")) throw Error("viewer " + JSON.stringify(client.viewerImage))
         client.closeImage()
         if (note(2, "gone.webp") !== "preview unavailable · not found") throw Error("failure note " + note(2, "gone.webp"))
         if (note(3, "flaky.jpg") !== "preview unavailable · download failed") throw Error("network note " + note(3, "flaky.jpg"))
         if (fetches().length !== 3) throw Error("refetched " + fetches().length)
         // A reconnect retries network failures once its history arrives; not_found stays.
-        client.handleLine(JSON.stringify({type:"ready"}))
-        client.handleLine(history)
+        client.handleDaemon(({type:"ready"}))
+        client.handleDaemon(JSON.parse(history))
         if (fetchOf("flaky.jpg").length !== 2 || fetchOf("gone.webp").length !== 1 || fetchOf("from-mac.png").length !== 1) throw Error("retry " + JSON.stringify(fetches()))
         find(row(0), "attachmentOpen")[0].clicked()
         var pdf = fetchOf("report.pdf")
         if (pdf.length !== 1 || pdf[0].uploadId !== "${ID}") throw Error("open did not fetch " + JSON.stringify(pdf))
-        client.handleLine(JSON.stringify({type:"attachment_cached", requestId: pdf[0].requestId, uploadId:"${ID}", name:"report.pdf", path: file("report.pdf"), mime:"application/pdf"}))
+        client.handleBridge(({type:"attachment_cached", requestId: pdf[0].requestId, uploadId:"${ID}", name:"report.pdf", path: cached("report.pdf"), mime:"application/pdf"}))
         // The open command is a process that writes what it was given to "opened".
         var opened = ""
         until(function() {
@@ -166,7 +171,7 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
           opened = probe.out
           return opened !== ""
         }, 10000, "the open command ran")
-        if (opened !== file("report.pdf")) throw Error("opened " + JSON.stringify(opened))
+        if (opened !== cached("report.pdf")) throw Error("opened " + JSON.stringify(opened))
         console.log("QML_PASS")
       } catch (e) { console.log("QML_FAIL: " + e) }
       Qt.quit()
@@ -175,8 +180,134 @@ test('history images with an uploadId are fetched once and shown as thumbnails; 
   Timer { interval: 150; running: true; onTriggered: checks.run() }
   `, {files: {
     'shot.png': png(),
-    'from-mac.png': png(6, 4),
-    'report.pdf': '%PDF-1.4\n',
+    [`omarchy-gentle-dot/cache/${ID}/from-mac.png`]: png(6, 4),
+    [`omarchy-gentle-dot/cache/${ID}/report.pdf`]: '%PDF-1.4\n',
     'open': '#!/bin/sh\nprintf "%s" "$1" > "$(dirname "$0")/opened"\n',
+  }});
+});
+
+// S22.1 should-fix: a history load fetches at most 20 previews (the newest); the others wait for
+// a click, so a daemon cannot make the bridge download hundreds of files at once.
+test('a history load auto-fetches at most 20 image previews, newest first; the rest load on click', async t => {
+  await qml(t, `
+  Plugin.Client { id: client; entrySettings: ({notifications:false})
+    property var sent: []; function send(obj) { sent = sent.concat([obj]); return true } }
+  FloatingWindow {
+    visible: true; width: 600; height: 1000
+    Plugin.ChatView { id: chat; anchors.fill: parent; client: client; model: client.messages }
+  }
+  ${helpers}
+  function fetches() { return client.sent.filter(function(m) { return m.type === "fetch_attachment" }) }
+  function id(i) { return "u_Many" + ("000000000000000000" + i).slice(-18) }
+  TestCase {
+    id: checks; when: false
+    ${poll}
+    function run() {
+      try {
+        var messages = []
+        for (var i = 0; i < 25; i++)
+          messages.push({id: "m" + i, role: "user", text: "", attachments: [{name: "p.png", size: 9, mime: "image/png", uploadId: id(i)}]})
+        client.handleDaemon({type: "history", messages: messages})
+        var list = fetches()
+        if (list.length !== 20) throw Error("fetches " + list.length)
+        for (var j = 0; j < 20; j++) if (!list.some(function(m) { return m.uploadId === id(24 - j) })) throw Error("newest not fetched " + (24 - j))
+        if (list.some(function(m) { return m.uploadId === id(0) })) throw Error("oldest fetched")
+        var first = JSON.parse(client.messages.get(0).attachments)[0]
+        if (!first.deferred || first.loading) throw Error("row " + JSON.stringify(first))
+        // A live message from another client is not held back by the history's budget.
+        client.handleDaemon({type: "user_message", messageId: "live", text: "", attachments: [{name: "q.png", size: 9, mime: "image/png", uploadId: id(99)}]})
+        if (fetches().length !== 21) throw Error("live image not fetched " + fetches().length)
+        // The oldest row offers to load its preview; its click fetches the preview, it opens nothing.
+        chat.positionViewAtBeginning()
+        var button = null
+        settle(function() {
+          var first = row(0)
+          check(first, "row 0")
+          var notes = find(first, "chipNote")
+          check(notes.length === 1 && notes[0].text === "preview not loaded", "note " + (notes.length ? notes[0].text : "none"))
+          button = find(first, "attachmentOpen")[0]
+          check(button && button.tooltipText === "Load preview of p.png", "load button")
+        })
+        button.clicked()
+        var asked = fetches().filter(function(m) { return m.uploadId === id(0) })
+        if (asked.length !== 1 || client.pendingOpens[id(0) + "/p.png"]) throw Error("click " + JSON.stringify(asked) + " " + JSON.stringify(client.pendingOpens))
+        // The same history again asks for nothing new: what it shows already used its budget.
+        client.handleDaemon({type: "history", messages: messages})
+        if (fetches().length !== 22) throw Error("refetched " + fetches().length)
+        if (!JSON.parse(client.messages.get(1).attachments)[0].deferred) throw Error("repeat history fetched more")
+        console.log("QML_PASS")
+      } catch (e) { console.log("QML_FAIL: " + e) }
+      Qt.quit()
+    }
+  }
+  Timer { interval: 150; running: true; onTriggered: checks.run() }
+  `);
+});
+
+// S22.1 advisory: Open hands a file to xdg-open (its path on that command line, on the user's
+// click). Only images, PDFs and plain text whose bytes match their name open; anything else (a
+// cached .desktop file, a script) is left where it is, with its path to copy.
+test('Open runs xdg-open only for images, PDFs and plain text; other files show where they are saved, with Copy path', async t => {
+  await qml(t, `
+  Plugin.Client { id: client; entrySettings: ({notifications:false}); openCommand: [file("open")]; clipboardCommand: [file("copy")]
+    property var sent: []; function send(obj) { sent = sent.concat([obj]); return true } }
+  FloatingWindow {
+    visible: true; width: 600; height: 1000
+    Plugin.ChatView { id: chat; anchors.fill: parent; client: client; model: client.messages }
+  }
+  ${helpers}
+  function fetchOf(name) { return client.sent.filter(function(m) { return m.type === "fetch_attachment" && m.name === name }) }
+  function cached(name) { return Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-gentle-dot/cache/${ID}/" + name }
+  property var probe: Qt.createQmlObject("import Quickshell.Io; Process { id: proc; property alias out: collector.text; property bool done: false; stdout: StdioCollector { id: collector; waitForEnd: true; onStreamFinished: proc.done = true } }", chat)
+  function read(name) {
+    probe.done = false
+    probe.command = ["sh", "-c", "cat -- \\"$1\\" 2>/dev/null; true", "sh", file(name)]
+    probe.running = true
+    checks.until(function() { return probe.done }, 10000, "cat finishes")
+    return probe.out
+  }
+  TestCase {
+    id: checks; when: false
+    ${poll}
+    function run() {
+      try {
+        client.handleDaemon({type:"history", messages:[{id:"m", role:"user", text:"", attachments:[
+          {name:"tool.desktop", size:40, mime:"text/plain", uploadId:"${ID}"},
+          {name:"fake.pdf", size:40, mime:"application/pdf", uploadId:"${ID}"},
+          {name:"notes.txt", size:5, mime:"text/plain", uploadId:"${ID}"}]}]})
+        var opens = []
+        settle(function() { opens = find(row(0), "attachmentOpen"); check(opens.length === 3, "open buttons " + opens.length) })
+        for (var i = 0; i < 3; i++) opens[i].clicked()
+        // The bridge's own type, from the bytes: a .desktop file, a "pdf" that is not one, real text.
+        client.handleBridge({type:"attachment_cached", requestId: fetchOf("tool.desktop")[0].requestId, uploadId:"${ID}", name:"tool.desktop", path: cached("tool.desktop"), mime:"application/octet-stream"})
+        client.handleBridge({type:"attachment_cached", requestId: fetchOf("fake.pdf")[0].requestId, uploadId:"${ID}", name:"fake.pdf", path: cached("fake.pdf"), mime:"application/octet-stream"})
+        check(client.notice.indexOf("Saved to " + cached("fake.pdf")) === 0, "notice " + client.notice)
+        client.handleBridge({type:"attachment_cached", requestId: fetchOf("notes.txt")[0].requestId, uploadId:"${ID}", name:"notes.txt", path: cached("notes.txt"), mime:"text/plain"})
+        var opened = ""
+        until(function() { opened = read("opened"); return opened !== "" }, 10000, "notes.txt opened")
+        check(opened === cached("notes.txt") + "\\n", "opened " + JSON.stringify(opened))
+        wait(300)
+        check(read("opened") === cached("notes.txt") + "\\n", "opened more than notes.txt: " + read("opened"))
+        // The chips now offer the saved files' paths instead of Open.
+        var copies = []
+        settle(function() { copies = find(row(0), "attachmentCopyPath"); check(copies.length === 2, "copy path buttons " + copies.length) })
+        check(find(row(0), "attachmentOpen").length === 1, "open buttons left " + find(row(0), "attachmentOpen").length)
+        check(client.openFile(cached("tool.desktop")) === false, "openFile ran a .desktop file")
+        copies[0].clicked()
+        var copied = ""
+        until(function() { copied = read("copied"); return copied !== "" }, 10000, "path copied")
+        check(copied === cached("tool.desktop"), "copied " + JSON.stringify(copied))
+        console.log("QML_PASS")
+      } catch (e) { console.log("QML_FAIL: " + e) }
+      Qt.quit()
+    }
+  }
+  Timer { interval: 150; running: true; onTriggered: checks.run() }
+  `, {files: {
+    [`omarchy-gentle-dot/cache/${ID}/tool.desktop`]: '[Desktop Entry]\nType=Application\nExec=true\n',
+    [`omarchy-gentle-dot/cache/${ID}/fake.pdf`]: '#!/bin/sh\ntrue\n',
+    [`omarchy-gentle-dot/cache/${ID}/notes.txt`]: 'hello',
+    'open': '#!/bin/sh\nprintf "%s\\n" "$1" >> "$(dirname "$0")/opened"\n',
+    'copy': '#!/bin/sh\ncat > "$(dirname "$0")/copied"\n',
   }});
 });

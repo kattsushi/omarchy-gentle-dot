@@ -80,6 +80,10 @@ ListView {
     attachments: model.attachments
     onOpenImage: function(image) { if (view.client) view.client.openImage(image) }
     onOpenFile: function(file) { if (view.client) view.client.openAttachment(file) }
+    onCopyPath: function(path) { if (view.client) view.client.copyPath(path) }
+    loadedImages: view.client ? view.client.loadedImages : ({})
+    privacyMasked: view.client ? view.client.privacyMasked : true
+    onLoadImage: function(url) { if (view.client) view.client.allowImage(url) }
     now: view.client ? view.client.now : Date.now()
     width: ListView.view.width
     foreground: view.foreground

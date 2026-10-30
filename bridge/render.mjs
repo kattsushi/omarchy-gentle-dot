@@ -54,6 +54,12 @@ export function segments(text) {
 
 export const normalized = text => text.replace(/\s+/g, ' ').trim();
 
+const withoutSegments = message => {
+  if (!message || typeof message !== 'object' || !('segments' in message)) return message;
+  const { segments, ...rest } = message;
+  return rest;
+};
+
 // Per-connection state; bounded, and never persisted. Reuse richer streaming text
 // only if the old daemon changed whitespace, never if it changed the actual reply.
 export function renderer() {
@@ -72,8 +78,10 @@ export function renderer() {
   return message => {
     if (message.type === 'message_delta') remember(message.messageId, (recent.get(message.messageId) || '') + message.delta);
     if (message.type === 'message_done') return finish(message, message.messageId);
+    // The panel shows every role but "user" as an assistant message: its segments are always
+    // rendered here, never taken from the daemon (which could name local images or markup, S22.1).
     if (message.type === 'history') return { ...message, messages: (message.messages || []).map(m =>
-      m.role === 'assistant' ? finish(m, m.id) : m) };
+      m && m.role !== 'user' ? finish(m, m.id) : withoutSegments(m)) };
     return message;
   };
 }

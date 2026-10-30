@@ -85,6 +85,20 @@ export function autoFetched(mime) {
   return AUTO_FETCHED.indexOf(String(mime || "").toLowerCase()) >= 0;
 }
 
+// Types the chat's Open hands to xdg-open (S22.1): images, PDFs and plain text, by name, and only
+// when the type sniffed from the bytes (mimeFor, by the bridge) is that same type. Anything else, a
+// .desktop file or a script for one, is never opened from the chat.
+const OPENABLE = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  bmp: "image/bmp", pdf: "application/pdf", txt: "text/plain", log: "text/plain", md: "text/markdown",
+  csv: "text/csv", json: "application/json" };
+
+export function safeToOpen(path, mime) {
+  const name = String(path || "").split("/").pop();
+  const extension = name.toLowerCase().match(/\.([a-z0-9]+)$/);
+  const expected = extension && Object.prototype.hasOwnProperty.call(OPENABLE, extension[1]) ? OPENABLE[extension[1]] : "";
+  return !!expected && expected === String(mime || "").toLowerCase();
+}
+
 // file:// URL for a local path; # and ? are escaped too, so they stay part of the name.
 export function fileUrl(path) {
   return `file://${encodeURI(String(path || "")).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
@@ -122,42 +136,69 @@ export function localPathOf(value) {
   return text.startsWith("/") ? text : "";
 }
 
-// Image URLs the chat may load: https (fetched without any credentials) and local files.
+// Image URLs the chat may load: https only (fetched without any credentials). Markdown comes from
+// the daemon, so a local path or file:// URL would let it show any local image in the panel and
+// offer to copy or attach it (S22.1).
 export function allowedImageUrl(url) {
   const text = String(url || "").trim();
-  if (/^https:\/\/[^\s/]+/i.test(text)) return text;
-  const path = localPathOf(text);
-  return path ? `file://${encodeURI(path)}` : "";
+  return /^https:\/\/[^\s/]+/i.test(text) ? text : "";
 }
 
 const IMAGE = /!\[([^\]\n]*)\]\(\s*<?([^\s)>]+)>?(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/;
 const HTML_IMAGE = /<img\b[^>]*>/gi;
 
+// Text for Qt's Markdown renderer (md4c), which loads images of any scheme (local files included)
+// from image syntax and from raw HTML (<img>, background attributes, CSS). Every "![" and every "<"
+// gets an invisible WORD JOINER (U+2060) after it: "!\u2060[" is no image and "<\u2060" starts no
+// tag, comment or autolink, in prose and in code spans alike, so nothing depends on guessing where
+// md4c sees a code span (a blank line, a table cell or a cut text all end one). Idempotent.
+const JOINER = "\u2060";
+export function inertMarkdown(text) {
+  return String(text || "").replace(/<(?!\u2060)/g, "<" + JOINER).replace(/!(?=\[)/g, "!" + JOINER);
+}
+
+// An inline code piece whose images stay unextracted: equal opening and closing backtick runs, an
+// unescaped opening run, and no line break or table pipe (md4c ends a code span at either). This
+// only decides which https images become image parts; every piece is made inert either way.
+function inlineCode(piece, before) {
+  const open = piece.match(/^`+/)[0].length;
+  const close = piece.match(/`+$/)[0].length;
+  return open === close && piece.length > open * 2 - 1 && !/\\$/.test(before) && !/[\n\r|]/.test(piece);
+}
+
 // Splits Markdown prose into prose and image parts so images never reach Qt's Markdown
 // renderer (which would fetch any scheme). Allowed images become {type:"image", url, alt};
-// others, and raw <img> tags, become their alt text. Inline code is left untouched.
+// others, and raw <img> tags, become their alt text; the prose is made inert (inertMarkdown).
 export function markdownParts(text) {
   const parts = [];
   let prose = "";
-  const pushProse = () => { if (prose) parts.push({ type: "md", text: prose }); prose = ""; };
+  // Inert pieces can recreate "![" where they meet ("!" + "[alt]"), so the joined prose is made inert again.
+  const pushProse = () => { if (prose) parts.push({ type: "md", text: inertMarkdown(prose) }); prose = ""; };
   const pieces = String(text || "").split(/(`+[^`]*?`+)/);
+  let before = "";
   for (const piece of pieces) {
-    if (/^`/.test(piece)) { prose += piece; continue; }
+    if (/^`/.test(piece) && inlineCode(piece, before)) { prose += inertMarkdown(piece); before = piece; continue; }
     let last = 0;
     const plain = piece.replace(HTML_IMAGE, "");
     const pattern = new RegExp(IMAGE.source, "g");
     let match;
     while ((match = pattern.exec(plain))) {
-      prose += plain.slice(last, match.index);
+      prose += inertMarkdown(plain.slice(last, match.index));
       last = match.index + match[0].length;
       const url = allowedImageUrl(match[2]);
       if (url) {
         pushProse();
         parts.push({ type: "image", url, alt: match[1] });
-      } else prose += match[1];
+      } else prose += inertMarkdown(match[1]);
     }
-    prose += plain.slice(last);
+    prose += inertMarkdown(plain.slice(last));
+    before = piece;
   }
   pushProse();
   return parts.filter(part => part.type !== "md" || part.text.trim() !== "");
+}
+
+// Markdown for a text with no image parts (an ask's message): images keep only their alt text.
+export function markdownText(text) {
+  return inertMarkdown(markdownParts(text).map(part => part.type === "md" ? part.text : inertMarkdown(part.alt)).join(""));
 }

@@ -24,6 +24,8 @@ FocusScope {
   property bool failed: false
   // Keyboard shortcut (S19.3): detected from `hyprctl binds -j`, never written by the plugin.
   property string hyprctlCommand: "hyprctl"
+  // The /health probe; the URL goes to curl over stdin (-K -), never on its command line (S22.2).
+  property var curlCommand: ["curl"]
   property string clipboardCommand: "wl-copy"
   readonly property string shortcutSnippet: decodeURIComponent(String(Qt.resolvedUrl("hypr/gentle-dot.lua")).replace(/^file:\/\//, ""))
   property string shortcutState: "checking"   // checking | found | missing | unknown
@@ -188,14 +190,23 @@ FocusScope {
       else client.tokenFileExists(path, proceed)
     }
     if (!testOnly || !remoteMode) { checkToken(); return }
-    // Remote test: first prove something answers, so the message says what is wrong.
+    // Remote test: first prove something answers, so the message says what is wrong. curl reads the
+    // address from a config line: one with a quote, backslash or line break is refused instead.
+    if (/["\\\r\n]/.test(healthUrlOf(url))) {
+      working = false
+      result("The address has a character it cannot have (a quote, backslash or line break).", true)
+      return
+    }
     result("Checking " + healthUrlOf(url) + "…", false)
     healthProbe.callback = function(exitCode, status) {
       var problem = healthProblem(exitCode, status, url)
       if (problem) { working = false; result(problem, true) }
       else checkToken()
     }
-    healthProbe.command = ["curl", "-sS", "-m", "5", "-o", "/dev/null", "-w", "%{http_code}", healthUrlOf(url)]
+    // curl config syntax: url = "<value>" (no quote, backslash or line break: refused above).
+    healthProbe.config = "url = \"" + healthUrlOf(url) + "\"\n"
+    healthProbe.command = curlCommand.concat(["-sS", "-m", "5", "-o", "/dev/null", "-w", "%{http_code}", "-K", "-"])
+    healthProbe.stdinEnabled = true
     healthProbe.running = true
   }
 
@@ -203,6 +214,13 @@ FocusScope {
     id: healthProbe
     property var callback: null
     property string status: ""
+    property string config: ""
+    onStarted: {
+      write(config)
+      config = ""
+      // Closing stdin ends curl's config.
+      stdinEnabled = false
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: healthProbe.status = text.trim()

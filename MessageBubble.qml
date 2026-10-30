@@ -5,6 +5,7 @@ import qs.Commons as Commons
 import qs.Ui as Ui
 import "bridge/time-format.mjs" as TimeFormat
 import "bridge/attachments.mjs" as Attachments
+import "privacy.mjs" as Privacy
 
 // Right-aligned user bubble and rose-tinted assistant card, each with its time in the side
 // gutter. Raw text remains separate from bridge-rendered segments so copying never copies
@@ -33,8 +34,20 @@ Item {
   }
   // {path, url, name, mime}: the chat opens it in the image viewer.
   signal openImage(var image)
-  // An attachment row: the chat opens its file (fetched first when only the daemon has it).
+  // https Markdown images load only after a click (S22.1): the URLs the client allowed this
+  // session, plus those clicked here. The placeholder names the host, masked for screen sharing.
+  property var loadedImages: ({})
+  property var loadedHere: ({})
+  property bool privacyMasked: true
+  signal loadImage(string url)
+  function imageHost(url) {
+    var match = /^https:\/\/(?:[^\/?#@]*@)?([^\/?#]+)/i.exec(String(url || ""))
+    return match ? match[1] : ""
+  }
+  // An attachment row: the chat opens its file (fetched first when only the daemon has it), or
+  // copies the path of a saved file it does not open.
   signal openFile(var file)
+  signal copyPath(string path)
   // Milliseconds (0 = unknown: no label) and the shared clock it is shown against.
   property real at: 0
   property real now: Date.now()
@@ -275,15 +288,26 @@ Item {
               // daemon's (S14.7) once the bridge has downloaded it.
               Ui.PanelActionButton {
                 objectName: "attachmentOpen"
-                visible: !Attachments.autoFetched(modelData.mime) && !modelData.loading
-                  && (!!modelData.path || !!modelData.uploadId)
+                visible: (!Attachments.autoFetched(modelData.mime) || !!modelData.deferred) && !modelData.loading
+                  && (!!modelData.path ? !!modelData.openable : !!modelData.uploadId)
                 anchors.verticalCenter: parent.verticalCenter
-                iconText: "󰏌"
-                tooltipText: "Open " + modelData.name
+                iconText: modelData.deferred ? "󰋩" : "󰏌"
+                tooltipText: (modelData.deferred ? "Load preview of " : "Open ") + modelData.name
                 foreground: bubble.dim
                 fontFamily: "JetBrainsMono Nerd Font"
                 fontSize: Style.font.caption + 2
                 onClicked: bubble.openFile(modelData)
+              }
+              Ui.PanelActionButton {
+                objectName: "attachmentCopyPath"
+                visible: !!modelData.path && !modelData.openable && !Attachments.autoFetched(modelData.mime)
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "󰆏"
+                tooltipText: "Copy the path of " + modelData.name + " (saved, not opened)"
+                foreground: bubble.dim
+                fontFamily: "JetBrainsMono Nerd Font"
+                fontSize: Style.font.caption + 2
+                onClicked: bubble.copyPath(modelData.path)
               }
               AttachmentChip {
                 name: modelData.name
@@ -292,6 +316,7 @@ Item {
                 path: modelData.path || ""
                 // History without bytes we can fetch (old daemons, failed downloads) keeps the chip.
                 note: modelData.loading ? (Attachments.isImage(modelData.mime) ? "loading preview…" : "downloading…")
+                  : modelData.deferred ? "preview not loaded"
                   : Attachments.isImage(modelData.mime) ? "preview unavailable" + (modelData.reason ? " · " + modelData.reason : "")
                   : (modelData.reason || "")
                 foreground: bubble.foreground
@@ -413,11 +438,53 @@ Item {
             }
             Component {
               id: imageSegment
-              Thumbnail {
-                imageName: "markdownImage"
-                url: modelData.url
-                path: Attachments.localPathOf(modelData.url)
-                name: modelData.alt || ""
+              Item {
+                id: remoteImage
+                readonly property bool allowed: !!bubble.loadedImages[modelData.url] || !!bubble.loadedHere[modelData.url]
+                width: allowed ? image.width : placeholder.width
+                height: allowed ? image.height : placeholder.height
+                Thumbnail {
+                  id: image
+                  visible: remoteImage.allowed
+                  imageName: "markdownImage"
+                  url: remoteImage.allowed ? modelData.url : ""
+                  name: modelData.alt || ""
+                }
+                Rectangle {
+                  id: placeholder
+                  objectName: "imagePlaceholder"
+                  visible: !remoteImage.allowed
+                  width: Math.min(assistantColumn.width, placeholderText.implicitWidth + Style.space(20))
+                  height: placeholderText.implicitHeight + Style.space(12)
+                  radius: Style.cornerRadius
+                  color: placeholderHit.containsMouse ? Qt.rgba(bubble.foreground.r, bubble.foreground.g, bubble.foreground.b, 0.12)
+                    : Qt.rgba(bubble.foreground.r, bubble.foreground.g, bubble.foreground.b, 0.06)
+                  Text {
+                    id: placeholderText
+                    objectName: "imagePlaceholderText"
+                    anchors.centerIn: parent
+                    width: Math.min(implicitWidth, assistantColumn.width - Style.space(20))
+                    text: "Load image from " + (bubble.privacyMasked ? Privacy.maskValue(bubble.imageHost(modelData.url)) : bubble.imageHost(modelData.url))
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    color: bubble.dim
+                    font.family: bubble.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  MouseArea {
+                    id: placeholderHit
+                    objectName: "imagePlaceholderHit"
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      var next = Object.assign({}, bubble.loadedHere)
+                      next[modelData.url] = true
+                      bubble.loadedHere = next
+                      bubble.loadImage(modelData.url)
+                    }
+                  }
+                }
               }
             }
           }

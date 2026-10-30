@@ -78,8 +78,12 @@ Item {
   property var attachments: []
   property bool uploading: false
   property string uploadRequestId: ""
+  // The paths of the upload in flight, in order: its upload_done must name exactly these (S22.1).
+  property var uploadPaths: []
   property string uploadStatus: ""
-  property string inspectRequestId: ""
+  // inspect_files requests waiting for their answer: requestId -> the paths asked about. Each is
+  // answered once, and only about those paths (S22.1).
+  property var inspectRequests: ({})
   // This session's uploads: "uploadId/name" -> local path, and "name|size" -> local path to
   // match the AttachmentInfo of daemons that send no upload id.
   property var localFiles: ({})
@@ -91,8 +95,23 @@ Item {
   // requestId -> "uploadId/name", and the keys the user asked to open once they are cached.
   property var fetchRequests: ({})
   property var pendingOpens: ({})
+  // https Markdown images the user chose to load this session (S22.1): url -> true.
+  property var loadedImages: ({})
+  function allowImage(url) {
+    var value = String(url || "")
+    if (!value || Attachments.allowedImageUrl(value) !== value) return false
+    var next = Object.assign({}, loadedImages)
+    next[value] = true
+    loadedImages = next
+    return true
+  }
   // Opens a file with its default application; injectable for headless tests.
   property var openCommand: ["xdg-open"]
+  // The type the bridge sniffed for each local file the panel knows: path -> mime (inspected,
+  // uploaded or cached). Open uses it, never the daemon's word (Attachments.safeToOpen).
+  property var fileTypes: ({})
+  // Copies text (a saved file's path) over stdin; injectable for headless tests.
+  property var clipboardCommand: ["wl-copy"]
   // The image shown in the viewer: {path, url, name, mime}, or null.
   property var viewerImage: null
   // Injectable commands keep headless tests off the real Wayland clipboard.
@@ -100,6 +119,8 @@ Item {
   property var clipboardPasteCommand: ["wl-paste"]
   property var imageCopyCommand: ["wl-copy"]
   readonly property string pasteDir: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-gentle-dot"
+  // Where the bridge caches the files it fetches: <cacheDir>/<uploadId>/<name> (bridge/bridge.mjs).
+  readonly property string cacheDir: pasteDir + "/cache"
 
   readonly property string notLocalNotice: "Only files from this computer can be attached. Save it first, then drop the file."
 
@@ -117,10 +138,38 @@ Item {
     }
     if (notLocal) showNotice(notLocalNotice, "warning")
     if (!paths.length) return false
-    requestSerial++
-    inspectRequestId = "inspect-" + requestSerial
-    if (send({ type: "inspect_files", requestId: inspectRequestId, paths: paths })) return true
+    var requestId = newRequestId("inspect")
+    if (send({ type: "inspect_files", requestId: requestId, paths: paths })) {
+      inspectRequests[requestId] = paths
+      return true
+    }
     showNotice("The bridge is not running: files cannot be attached.", "error")
+    return false
+  }
+
+  // Request ids nobody else can guess (a forged answer would need one, S22.1).
+  function newRequestId(prefix) {
+    requestSerial++
+    return prefix + "-" + Date.now().toString(36) + "-" + requestSerial + "-" + Math.random().toString(36).slice(2, 10)
+  }
+
+  function own(map, key) { return typeof key === "string" && Object.prototype.hasOwnProperty.call(map, key) }
+
+  // A result the client did not ask for, or not about what it asked: logged without its content.
+  function dropped(type, why) {
+    console.warn("omarchy-gentle-dot: dropped " + String(type || "a message").slice(0, 40) + " from the bridge: " + why)
+  }
+
+  // Files the panel may show, open, copy or attach again: those the user attached or this client
+  // uploaded, and the copies the bridge cached for this client's own fetches. A path named by the
+  // daemon is none of these (S22.1).
+  function knownPath(path) {
+    var value = String(path || "")
+    if (!value) return false
+    if (attachments.some(function(file) { return file.path === value })) return true
+    for (var id in localFiles) if (localFiles[id] === value) return true
+    for (var info in localByInfo) if (localByInfo[info] === value) return true
+    for (var key in remoteFiles) if (remoteFiles[key].state === "ready" && remoteFiles[key].path === value) return true
     return false
   }
 
@@ -144,6 +193,7 @@ Item {
   function acceptInspected(files) {
     var result = Attachments.addWithinLimits(attachments, files, Attachments.ATTACHMENT_LIMITS)
     attachments = result.list
+    for (var i = 0; i < result.list.length; i++) rememberType(result.list[i].path, result.list[i].mime)
     if (result.errors.length) showNotice(result.errors.join(" "), "error")
   }
 
@@ -152,10 +202,15 @@ Item {
     attachments = attachments.filter(function(file) { return file.path !== path })
   }
 
+  // At most this many previews are fetched on their own per history load (S22.1), newest first;
+  // a live message fetches at most its own files' worth. The others wait for a click (`deferred`).
+  readonly property int autoFetchesPerHistory: 20
+
   // AttachmentInfo list -> JSON for a message row: the local path when this client sent the file or
   // its cached copy is ready; otherwise `uploadId` (Open fetches it), `loading` or the failure `reason`.
-  // Images with an upload id are fetched here, once per session.
-  function attachmentsJson(list) {
+  // Images with an upload id are fetched here, once per session, while `budget.left` allows.
+  function attachmentsJson(list, budget) {
+    var allowance = budget || { left: 0 }
     var rows = []
     for (var i = 0; Array.isArray(list) && i < list.length; i++) {
       var info = list[i] || {}
@@ -163,11 +218,20 @@ Item {
       var id = Attachments.validUploadId(info.uploadId) && Attachments.validStoredName(row.name) ? info.uploadId : ""
       if (id) row.uploadId = id
       var remote = id ? remoteFiles[id + "/" + row.name] : null
-      var path = (id && localFiles[id + "/" + row.name]) || localByInfo[row.name + "|" + row.size]
-        || (remote && remote.state === "ready" ? remote.path : "")
-      if (path) row.path = path
-      else if (id) {
-        if (!remote && Attachments.autoFetched(row.mime)) remote = fetchAttachment(id, row.name, false)
+      var own = (id && localFiles[id + "/" + row.name]) || localByInfo[row.name + "|" + row.size]
+      var path = own || (remote && remote.state === "ready" ? remote.path : "")
+      // Every stored image shown counts, fetched before or not: a repeated history gets no more.
+      var counted = id && !own && Attachments.autoFetched(row.mime)
+      var allowed = counted && allowance.left > 0
+      if (counted && allowance.left > 0) allowance.left--
+      if (path) {
+        row.path = path
+        row.openable = Attachments.safeToOpen(path, typeOf(path))
+      } else if (id) {
+        if (!remote && counted) {
+          if (allowed) remote = fetchAttachment(id, row.name, false)
+          else row.deferred = true
+        }
         if (remote && remote.state === "loading") row.loading = true
         if (remote && remote.state === "failed") row.reason = fetchReason(remote.code)
       }
@@ -199,8 +263,7 @@ Item {
     }
     if (open) pendingOpens[key] = true
     if (known && (known.state === "loading" || !open)) return known
-    requestSerial++
-    var requestId = "fetch-" + requestSerial
+    var requestId = newRequestId("fetch")
     if (!send({ type: "fetch_attachment", requestId: requestId, uploadId: uploadId, name: name })) {
       delete pendingOpens[key]
       return null
@@ -221,10 +284,14 @@ Item {
     }
   }
 
+  // Only the answer to a fetch of ours, for the same file, cached where the bridge caches it.
   function fetchFinished(msg, entry) {
-    var key = fetchRequests[msg.requestId]
-    if (!key) return
+    var key = own(fetchRequests, msg.requestId) ? fetchRequests[msg.requestId] : ""
+    if (!key) { dropped(msg.type, "not an answer to a fetch of this client"); return }
+    if (msg.uploadId + "/" + msg.name !== key) { dropped(msg.type, "not the file that was asked for"); return }
+    if (entry.state === "ready" && entry.path !== cacheDir + "/" + key) { dropped(msg.type, "not in the cache folder"); return }
     delete fetchRequests[msg.requestId]
+    if (entry.state === "ready") rememberType(entry.path, entry.mime)
     setRemoteFile(key, entry)
     refreshAttachmentRows(key)
     if (!pendingOpens[key]) return
@@ -233,18 +300,58 @@ Item {
     else showNotice("Could not open " + key.slice(key.indexOf("/") + 1) + ": " + fetchReason(entry.code) + ".", "error")
   }
 
-  // A chip's Open: its local file, or the stored copy once the bridge has it.
+  // A chip's Open: its local file, or the stored copy once the bridge has it. An image whose preview
+  // was not fetched on its own (`deferred`) only gets its preview.
   function openAttachment(file) {
     if (!file) return false
     if (file.path) return openFile(file.path)
     if (!file.uploadId) return false
+    if (file.deferred && Attachments.autoFetched(file.mime)) {
+      if (fetchAttachment(file.uploadId, file.name, false)) return true
+      showNotice("The bridge is not running: the preview cannot be loaded.", "error")
+      return false
+    }
     if (fetchAttachment(file.uploadId, file.name, true)) return true
     showNotice("The bridge is not running: the file cannot be opened.", "error")
     return false
   }
 
+  function rememberType(path, mime) {
+    if (!path) return
+    var next = Object.assign({}, fileTypes)
+    next[path] = String(mime || "")
+    fileTypes = next
+  }
+
+  function typeOf(path) {
+    if (own(fileTypes, path)) return fileTypes[path]
+    var waiting = attachments.find(function(file) { return file.path === path })
+    return waiting ? waiting.mime : ""
+  }
+
+  // A saved file's path to the clipboard, over stdin.
+  function copyPath(path) {
+    if (!knownPath(path) || pathCopier.running) return false
+    pathCopier.text = String(path)
+    pathCopier.command = clipboardCommand
+    pathCopier.stdinEnabled = true
+    pathCopier.running = true
+    return true
+  }
+
+  // The path is on the opener's command line (xdg-open and the application it starts need it), on
+  // the user's click. Only files the panel knows are opened, and only images, PDFs and plain text
+  // whose bytes match their name; anything else stays where it is, with its path to copy.
   function openFile(path) {
     if (!path) return false
+    if (!knownPath(path)) {
+      console.warn("omarchy-gentle-dot: refused to open a file the panel did not attach or fetch")
+      return false
+    }
+    if (!Attachments.safeToOpen(path, typeOf(path))) {
+      showNotice("Saved to " + path + ". Only images, PDFs and plain text open from the chat: copy the path to open it yourself.", "warning")
+      return false
+    }
     Quickshell.execDetached(openCommand.concat([String(path)]))
     return true
   }
@@ -277,21 +384,32 @@ Item {
     localByInfo = byInfo
   }
 
+  // A local image only when the panel knows the file; otherwise only an https image (no copy or
+  // attach for those).
   function openImage(image) {
-    if (!image || (!image.path && !image.url)) return
-    viewerImage = { path: String(image.path || ""), url: String(image.url || Attachments.fileUrl(image.path)),
-      name: String(image.name || ""), mime: String(image.mime || "") }
+    if (!image) return
+    var path = String(image.path || "")
+    if (path && !knownPath(path)) {
+      console.warn("omarchy-gentle-dot: refused to show a file the panel did not attach or fetch")
+      return
+    }
+    var url = path ? Attachments.fileUrl(path) : Attachments.allowedImageUrl(image.url)
+    if (!url) return
+    viewerImage = { path: path, url: url, name: String(image.name || ""), mime: String(image.mime || "") }
   }
 
   function closeImage() { viewerImage = null }
 
-  // Copies the viewer's local image with its type (wl-copy --type <mime> < file).
+  // Copies the viewer's local image with its type (wl-copy --type <mime> < file). The file name
+  // goes over stdin, never on a command line.
   function copyImage(done) {
     var image = viewerImage
     if (!image || !image.path || imageCopier.running) { if (done) done(false); return }
     imageCopier.done = done || null
-    imageCopier.command = ["sh", "-c", "f=$1; shift; exec \"$@\" < \"$f\"", "sh", image.path]
+    imageCopier.target = image.path
+    imageCopier.command = ["sh", "-c", "IFS= read -r f && exec \"$@\" < \"$f\"", "sh"]
       .concat(imageCopyCommand, ["--type", image.mime || "image/png"])
+    imageCopier.stdinEnabled = true
     imageCopier.running = true
   }
 
@@ -396,8 +514,9 @@ Item {
   // Something in progress keeps the avatar awake however old the last event is.
   readonly property bool engaged: pendingAsks.length > 0 || uploading || voice.state !== "idle"
     || (connected && agentState !== "" && agentState !== "idle")
+  // Daemon frames that count as activity; the bridge's accepted upload events count too.
   readonly property var activityTypes: ["ready", "ask", "ask_resolved", "agent_state", "user_message", "message_delta",
-    "reasoning_delta", "message_done", "activity", "upload_progress", "upload_done", "upload_error", "toast", "error"]
+    "reasoning_delta", "message_done", "activity", "toast", "error"]
 
   function nowMs() { return Date.now() + clockOffset }
 
@@ -610,8 +729,8 @@ Item {
   property string notice: ""
   property string noticeLevel: "info"
 
-  // Every line from the bridge: daemon messages unchanged plus the bridge's own
-  // {"type":"bridge"} and {"type":"bridge_error"} lines.
+  // Every daemon frame, after the client handled it. The bridge's own events are never emitted
+  // here: they are not the daemon's (S22.1).
   signal message(var msg)
 
   property bool restartPending: false
@@ -660,31 +779,36 @@ Item {
 
   // --- settings -------------------------------------------------------------
 
-  // Writes a pasted token to `path` (0600, parent dir 0700). The token goes over
-  // stdin, never argv; the path is an argument, never interpolated into the script.
+  // Writes a pasted token to `path` (0600, parent dir 0700). The path and then the token go over
+  // stdin, never argv (a token path names the remote host, S16), and are never interpolated
+  // into the script.
   function writeToken(path, token, done) {
     var secret = String(token || "").trim()
-    if (tokenWriter.running || !secret || /[\r\n]/.test(secret)) {
+    var target = expandHome(path)
+    if (tokenWriter.running || !secret || /[\r\n]/.test(secret) || !target || /[\r\n]/.test(target)) {
       if (done) done(false)
       return
     }
     tokenWriter.secret = secret
+    tokenWriter.target = target
     tokenWriter.done = done || null
     tokenWriter.command = ["sh", "-c",
-      "umask 077; d=$(dirname -- \"$1\"); mkdir -p -- \"$d\" && chmod 700 -- \"$d\""
-        + " && IFS= read -r t && printf '%s\\n' \"$t\" > \"$1.tmp\" && chmod 600 -- \"$1.tmp\" && mv -f -- \"$1.tmp\" \"$1\"",
-      "sh", expandHome(path)]
+      "umask 077; IFS= read -r p && IFS= read -r t && d=$(dirname -- \"$p\") && mkdir -p -- \"$d\" && chmod 700 -- \"$d\""
+        + " && printf '%s\\n' \"$t\" > \"$p.tmp\" && chmod 600 -- \"$p.tmp\" && mv -f -- \"$p.tmp\" \"$p\""]
     tokenWriter.running = true
   }
 
-  // Calls done(true) when `path` is a non-empty file.
+  // Calls done(true) when `path` is a non-empty file. The path goes over stdin, never argv.
   function tokenFileExists(path, done) {
-    if (tokenProbe.running) {
+    var target = expandHome(path)
+    if (tokenProbe.running || !target || /[\r\n]/.test(target)) {
       if (done) done(false)
       return
     }
     tokenProbe.done = done || null
-    tokenProbe.command = ["test", "-s", expandHome(path)]
+    tokenProbe.target = target
+    tokenProbe.command = ["sh", "-c", "IFS= read -r p && test -s \"$p\""]
+    tokenProbe.stdinEnabled = true
     tokenProbe.running = true
   }
 
@@ -727,7 +851,9 @@ Item {
     if (tester.running) return false
     testState = "testing"
     testMessage = "Testing " + url + "…"
-    tester.command = [nodePath || "node", bridgePath, "--url", String(url || ""), "--token-file", String(tokenPath || "")]
+    // The URL and token file go over stdin, never argv (S22.2).
+    tester.config = JSON.stringify({ type: "config", url: String(url || ""), tokenFile: String(tokenPath || "") })
+    tester.command = [nodePath || "node", bridgePath, "--config-stdin"]
     tester.running = true
     testTimer.restart()
     return true
@@ -748,17 +874,23 @@ Item {
     testMessage = ""
   }
 
+  // Lines of the test bridge, in the same envelopes: ready only from the daemon, states only from
+  // the bridge.
   function handleTestLine(line) {
-    var msg
+    var envelope
     try {
-      msg = JSON.parse(line)
+      envelope = JSON.parse(line)
     } catch (e) {
       return
     }
-    if (!msg || typeof msg !== "object") return
-    if (msg.type === "ready") {
-      finishTest(true, "Connected (model: " + String(msg.model || "unknown") + ")")
-    } else if (msg.type === "bridge" && msg.state === "reconnecting") {
+    var msg = envelope && typeof envelope === "object" ? envelope.msg : null
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return
+    if (envelope.from === "daemon") {
+      if (msg.type === "ready") finishTest(true, "Connected (model: " + String(msg.model || "unknown") + ")")
+      return
+    }
+    if (envelope.from !== "bridge") return
+    if (msg.type === "bridge" && msg.state === "reconnecting") {
       finishTest(false, "Unreachable")
     } else if (msg.type === "bridge" && msg.state === "fatal") {
       if (msg.reason === "unauthorized") finishTest(false, "Token rejected")
@@ -780,9 +912,7 @@ Item {
     noteActivity()
     var body = String(text || "").trim()
     if (!body || !connected) return false
-    requestSerial++
-    var requestId = "omarchy-" + Date.now().toString(36) + "-" + requestSerial + "-" + Math.random().toString(36).slice(2, 8)
-    return send({ type: "send", text: body, requestId: requestId })
+    return send({ type: "send", text: body, requestId: newRequestId("omarchy") })
   }
 
   // With files: the bridge uploads them, then sends the message; the draft and the chips
@@ -792,10 +922,10 @@ Item {
     if (uploading) return false
     if (attachments.length) {
       if (!connected) return false
-      requestSerial++
-      uploadRequestId = "omarchy-" + Date.now().toString(36) + "-" + requestSerial + "-" + Math.random().toString(36).slice(2, 8)
+      uploadRequestId = newRequestId("omarchy")
+      uploadPaths = attachments.map(function(file) { return file.path })
       if (!send({ type: "upload_files", requestId: uploadRequestId, text: String(draft || "").trim(),
-        paths: attachments.map(function(file) { return file.path }) })) return false
+        paths: uploadPaths })) return false
       uploading = true
       uploadStatus = "Uploading…"
       return true
@@ -808,7 +938,18 @@ Item {
   function finishUpload() {
     uploading = false
     uploadRequestId = ""
+    uploadPaths = []
     uploadStatus = ""
+  }
+
+  // upload_done names the files of the upload in flight, in order, each with its stored id and name.
+  function sameUpload(files) {
+    if (!Array.isArray(files) || files.length !== uploadPaths.length) return false
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i]
+      if (!file || file.path !== uploadPaths[i] || typeof file.uploadId !== "string" || typeof file.name !== "string") return false
+    }
+    return true
   }
 
   function abort() {
@@ -862,6 +1003,7 @@ Item {
   function bridgeEnded(exitCode) {
     ready = false
     finishUpload()
+    inspectRequests = ({})
     forgetFetches(["loading"], ["network"])
     if (stopping) {
       stopping = false
@@ -905,7 +1047,7 @@ Item {
   // --- conversation -------------------------------------------------------
 
   // `at`: milliseconds, 0 when the time is unknown (history from daemons without `at`).
-  function messageRow(id, role, text, phase, error, activities, segments, reasoning, at, attachments) {
+  function messageRow(id, role, text, phase, error, activities, segments, reasoning, at, attachments, budget) {
     return {
       at: TimeFormat.timestampOf(at),
       msgId: String(id || ""),
@@ -914,19 +1056,25 @@ Item {
       phase: String(phase || "done"),
       error: String(error || ""),
       activities: JSON.stringify(Array.isArray(activities) ? activities : []),
-      segments: JSON.stringify(Array.isArray(segments) ? segments : []),
+      segments: JSON.stringify(textSegments(segments)),
       reasoning: String(reasoning || ""),
-      attachments: attachmentsJson(attachments)
+      attachments: attachmentsJson(attachments, budget)
     }
   }
 
+  // Rows are built newest first, so the preview budget goes to the latest images.
   function resetMessages(list) {
+    var budget = { left: autoFetchesPerHistory }
+    var rows = []
+    for (var i = list.length - 1; i >= 0; i--) {
+      var m = list[i] || {}
+      rows[i] = messageRow(m.id, m.role, m.text, "done", "", m.activities, m.segments, m.reasoning, m.at, m.attachments, budget)
+    }
     messages.clear()
     var index = ({})
-    for (var i = 0; i < list.length; i++) {
-      var m = list[i] || {}
-      index[String(m.id)] = messages.count
-      messages.append(messageRow(m.id, m.role, m.text, "done", "", m.activities, m.segments, m.reasoning, m.at, m.attachments))
+    for (var j = 0; j < rows.length; j++) {
+      index[String((list[j] || {}).id)] = messages.count
+      messages.append(rows[j])
     }
     indexById = index
   }
@@ -965,35 +1113,34 @@ Item {
     messages.setProperty(at, "activities", JSON.stringify(list))
   }
 
+  // Every bridge line is an envelope, {"from": "daemon" | "bridge", "msg": {...}}
+  // (bridge/bridge.mjs). Daemon frames and the bridge's own events are handled apart: whatever its
+  // type, a daemon frame never acts as a local result (files_inspected, upload_*, attachment_*) or
+  // as the bridge's state (S22.1). Lines are logged without their content, which may be private.
   function handleLine(line) {
     if (!String(line).trim()) return
-    var msg
+    var envelope
     try {
-      msg = JSON.parse(line)
+      envelope = JSON.parse(line)
     } catch (e) {
-      console.warn("omarchy-gentle-dot: bad bridge line", String(line).slice(0, 200))
+      console.warn("omarchy-gentle-dot: dropped an unreadable bridge line (" + String(line).length + " characters)")
       return
     }
-    if (!msg || typeof msg !== "object") return
+    var msg = envelope && typeof envelope === "object" ? envelope.msg : null
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+      console.warn("omarchy-gentle-dot: dropped a bridge line without a message")
+      return
+    }
+    if (envelope.from === "daemon") handleDaemon(msg)
+    else if (envelope.from === "bridge") handleBridge(msg)
+    else console.warn("omarchy-gentle-dot: dropped a bridge line of unknown origin")
+  }
 
-    if (msg.type === "bridge" ? String(msg.state || "") !== connection : activityTypes.indexOf(msg.type) >= 0) noteActivity()
+  // A frame from the daemon: the conversation, asks, agent state, toasts and errors only.
+  function handleDaemon(msg) {
+    if (activityTypes.indexOf(msg.type) >= 0) noteActivity()
     var at
     switch (msg.type) {
-      case "bridge":
-        if (msg.state !== "open") {
-          ready = false
-          endTurn()
-        }
-        if (msg.state === "fatal") {
-          fatalReason = String(msg.reason || "")
-          fatalMessage = fatalText(msg)
-        }
-        connection = String(msg.state || "")
-        break
-      case "bridge_error":
-        if (msg.code === "not_connected") showNotice(msg.message, "warning")
-        else console.warn("omarchy-gentle-dot bridge:", msg.code, msg.message)
-        break
       case "ready":
         // attach() replays pending asks immediately after ready, BEFORE the
         // asynchronous get_history response. History must not clear that replay.
@@ -1021,7 +1168,8 @@ Item {
       case "user_message":
         at = ensureMessage(msg.messageId, "user")
         messages.setProperty(at, "text", String(msg.text || ""))
-        if (Array.isArray(msg.attachments)) messages.setProperty(at, "attachments", attachmentsJson(msg.attachments))
+        if (Array.isArray(msg.attachments))
+          messages.setProperty(at, "attachments", attachmentsJson(msg.attachments, { left: Attachments.ATTACHMENT_LIMITS.files }))
         stamp(at, msg.at)
         break
       case "message_delta":
@@ -1038,7 +1186,7 @@ Item {
       case "message_done":
         at = ensureMessage(msg.messageId, "assistant")
         messages.setProperty(at, "text", String(msg.text || ""))
-        messages.setProperty(at, "segments", JSON.stringify(Array.isArray(msg.segments) ? msg.segments : []))
+        messages.setProperty(at, "segments", JSON.stringify(textSegments(msg.segments)))
         if (typeof msg.reasoning === "string") messages.setProperty(at, "reasoning", msg.reasoning)
         messages.setProperty(at, "error", String(msg.error || ""))
         messages.setProperty(at, "phase", msg.error ? "error" : (msg.stopped ? "stopped" : "done"))
@@ -1050,33 +1198,6 @@ Item {
         upsertActivity(at, msg.activity)
         trackActivity(msg.activity)
         break
-      case "files_inspected":
-        acceptInspected(Array.isArray(msg.files) ? msg.files : [])
-        break
-      case "upload_progress":
-        if (msg.requestId !== uploadRequestId) break
-        uploadStatus = "Uploading " + String(msg.name || "") + " (" + (Number(msg.index) + 1) + "/" + Number(msg.count)
-          + ") · " + (msg.total > 0 ? Math.round(100 * msg.loaded / msg.total) : 100) + "%"
-        break
-      case "upload_done":
-        rememberUploads(Array.isArray(msg.files) ? msg.files : [])
-        if (msg.requestId !== uploadRequestId) break
-        finishUpload()
-        attachments = []
-        draft = ""
-        break
-      case "upload_error":
-        if (msg.requestId !== uploadRequestId) break
-        finishUpload()
-        showNotice(msg.message || "The upload failed.", "error")
-        break
-      case "attachment_cached":
-        fetchFinished(msg, msg.path ? { state: "ready", path: String(msg.path), mime: String(msg.mime || "") }
-          : { state: "failed", code: "network" })
-        break
-      case "attachment_error":
-        fetchFinished(msg, { state: "failed", code: String(msg.code || "") })
-        break
       case "toast":
         showNotice(msg.message, msg.level)
         break
@@ -1085,6 +1206,77 @@ Item {
         break
     }
     message(msg)
+  }
+
+  // An event of the bridge itself: its state, and the results of this client's own requests,
+  // taken only when they answer a request still waiting, about what it asked (S22.1).
+  function handleBridge(msg) {
+    switch (msg.type) {
+      case "bridge":
+        if (String(msg.state || "") !== connection) noteActivity()
+        if (msg.state !== "open") {
+          ready = false
+          endTurn()
+        }
+        if (msg.state === "fatal") {
+          fatalReason = String(msg.reason || "")
+          fatalMessage = fatalText(msg)
+        }
+        connection = String(msg.state || "")
+        break
+      case "bridge_error":
+        if (msg.code === "not_connected") showNotice(msg.message, "warning")
+        else console.warn("omarchy-gentle-dot bridge:", msg.code, msg.message)
+        break
+      case "files_inspected":
+        var asked = own(inspectRequests, msg.requestId) ? inspectRequests[msg.requestId] : null
+        if (!asked) { dropped(msg.type, "not an answer to a request of this client"); break }
+        if (!Array.isArray(msg.files) || !msg.files.every(function(file) { return file && asked.indexOf(file.path) >= 0 })) {
+          dropped(msg.type, "names files that were not asked about")
+          break
+        }
+        delete inspectRequests[msg.requestId]
+        acceptInspected(msg.files)
+        break
+      case "upload_progress":
+        if (!uploading || msg.requestId !== uploadRequestId) { dropped(msg.type, "not the upload in flight"); break }
+        noteActivity()
+        uploadStatus = "Uploading " + String(msg.name || "") + " (" + (Number(msg.index) + 1) + "/" + Number(msg.count)
+          + ") · " + (msg.total > 0 ? Math.round(100 * msg.loaded / msg.total) : 100) + "%"
+        break
+      case "upload_done":
+        if (!uploading || msg.requestId !== uploadRequestId) { dropped(msg.type, "not the upload in flight"); break }
+        if (!sameUpload(msg.files)) { dropped(msg.type, "names files that were not uploaded"); break }
+        noteActivity()
+        for (var u = 0; u < attachments.length; u++) rememberType(attachments[u].path, attachments[u].mime)
+        rememberUploads(msg.files)
+        finishUpload()
+        attachments = []
+        draft = ""
+        break
+      case "upload_error":
+        if (!uploading || msg.requestId !== uploadRequestId) { dropped(msg.type, "not the upload in flight"); break }
+        noteActivity()
+        finishUpload()
+        showNotice(msg.message || "The upload failed.", "error")
+        break
+      case "attachment_cached":
+        fetchFinished(msg, { state: "ready", path: String(msg.path || ""), mime: String(msg.mime || "") })
+        break
+      case "attachment_error":
+        fetchFinished(msg, { state: "failed", code: String(msg.code || "") })
+        break
+      default:
+        dropped(msg.type, "unknown event")
+    }
+  }
+
+  // Message segments as the bridge renders them: Markdown and code. Images are found in the
+  // Markdown when it is shown (Attachments.markdownParts), never taken from a segment.
+  function textSegments(list) {
+    return (Array.isArray(list) ? list : []).filter(function(segment) {
+      return segment && (segment.type === "md" || segment.type === "code")
+    })
   }
 
   Timer {
@@ -1123,7 +1315,9 @@ Item {
 
   Process {
     id: bridge
-    command: [client.nodePath, client.bridgePath, "--url", client.serverUrl, "--token-file", client.tokenFile]
+    // The daemon URL and token file go over stdin (--config-stdin), never argv: other local
+    // accounts can read command lines, and a host is private (S16, S22.2).
+    command: [client.nodePath, client.bridgePath, "--config-stdin"]
     stdinEnabled: true
 
     stdout: SplitParser {
@@ -1137,7 +1331,10 @@ Item {
     // Quickshell emits no exited() when the command cannot start (nodePath not found):
     // running just turns false without started().
     property bool launched: false
-    onStarted: launched = true
+    onStarted: {
+      launched = true
+      write(JSON.stringify({ type: "config", url: client.serverUrl, tokenFile: client.tokenFile }) + "\n")
+    }
     onRunningChanged: if (!running && !launched) client.bridgeEnded(127)
     onExited: function(exitCode) { client.bridgeEnded(exitCode) }
   }
@@ -1165,7 +1362,10 @@ Item {
 
   Process {
     id: tester
+    // Its {"type":"config"} line, written on start.
+    property string config: ""
     stdinEnabled: true
+    onStarted: write(config + "\n")
 
     stdout: SplitParser {
       onRead: function(line) { client.handleTestLine(line) }
@@ -1178,18 +1378,21 @@ Item {
 
   Process {
     id: tokenWriter
+    property string target: ""
     property string secret: ""
     property var done: null
     stdinEnabled: true
 
     onStarted: {
-      write(secret + "\n")
+      write(target + "\n" + secret + "\n")
+      target = ""
       secret = ""
     }
 
     onExited: function(exitCode) {
       var callback = done
       done = null
+      target = ""
       secret = ""
       if (callback) callback(exitCode === 0)
     }
@@ -1233,7 +1436,13 @@ Item {
 
   Process {
     id: imageCopier
+    property string target: ""
     property var done: null
+    onStarted: {
+      write(target + "\n")
+      target = ""
+      stdinEnabled = false
+    }
     onExited: function(exitCode) {
       var callback = done
       done = null
@@ -1242,8 +1451,25 @@ Item {
   }
 
   Process {
+    id: pathCopier
+    property string text: ""
+    onStarted: {
+      write(text)
+      text = ""
+      stdinEnabled = false
+    }
+    onExited: function(exitCode) { if (exitCode !== 0) client.showNotice("Could not copy the path.", "error") }
+  }
+
+  Process {
     id: tokenProbe
+    property string target: ""
     property var done: null
+    onStarted: {
+      write(target + "\n")
+      target = ""
+      stdinEnabled = false
+    }
 
     onExited: function(exitCode) {
       var callback = done

@@ -7,7 +7,7 @@ const NODE_MESSAGE = 'Gentle Dot needs Node.js 22 or newer. Install it (e.g. `om
 
 // Fake `node` commands. Each logs how it was called; anything but --version stands in for the
 // bridge and stops at once with a fatal line, so no daemon or network is involved.
-const bridgeLine = '{"type":"bridge","state":"fatal","reason":"bad_url","message":"fake bridge ran"}';
+const bridgeLine = '{"from":"bridge","msg":{"type":"bridge","state":"fatal","reason":"bad_url","message":"fake bridge ran"}}';
 const fake = version => `#!/bin/sh
 echo "$*" >> "$(dirname "$0")/calls-$(basename "$0").log"
 if [ "$1" = --version ]; then ${version}; exit 0; fi

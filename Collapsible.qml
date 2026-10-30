@@ -2,6 +2,7 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 import qs.Commons as Commons
+import "bridge/attachments.mjs" as Attachments
 
 Column {
   id: root
@@ -17,7 +18,9 @@ Column {
   // The body text, so a parent can tell where its last line ends.
   property alias textItem: body
   readonly property bool togglesVisible: label === "" && lineCount > limit
-  readonly property string visibleText: !longContent || expanded ? text : (label ? "" : text.split("\n").slice(0, limit).join("\n"))
+  readonly property string shownText: !longContent || expanded ? text : (label ? "" : text.split("\n").slice(0, limit).join("\n"))
+  // Markdown goes to Qt's renderer inert (no images, no HTML) whatever was cut (S22.1).
+  readonly property string visibleText: markdown ? Attachments.inertMarkdown(shownText) : shownText
   spacing: 4
 
   component ToggleRow: Rectangle {

@@ -135,13 +135,13 @@ test('client carries optional rendering fields through history and live deltas, 
   Plugin.ChatView { id: chat; width: 600; height: 800; client: client; model: client.messages }
   Timer { interval: 150; running: true; onTriggered: {
     try {
-      client.handleLine(JSON.stringify({type:"history",messages:[{id:"old",role:"user",text:"Original"},{id:"new",role:"assistant",text:"code",reasoning:"History thought",segments:[{type:"code",lang:"python",code:"print(1)",html:"print(<span style=\\"color:#f6c177\\">1</span>)"}],activities:[{id:"a",kind:"memory",title:"Checked notes",status:"done"}]}]}))
+      client.handleDaemon(({type:"history",messages:[{id:"old",role:"user",text:"Original"},{id:"new",role:"assistant",text:"code",reasoning:"History thought",segments:[{type:"code",lang:"python",code:"print(1)",html:"print(<span style=\\"color:#f6c177\\">1</span>)"}],activities:[{id:"a",kind:"memory",title:"Checked notes",status:"done"}]}]}))
       if (client.messages.count !== 2 || client.messages.get(0).text !== "Original" || client.messages.get(0).reasoning !== "") throw Error("old message")
       if (client.messages.get(1).reasoning !== "History thought" || JSON.parse(client.messages.get(1).segments)[0].lang !== "python") throw Error("history")
-      client.handleLine(JSON.stringify({type:"reasoning_delta",messageId:"live",delta:"Think"}))
-      client.handleLine(JSON.stringify({type:"reasoning_delta",messageId:"live",delta:" more"}))
-      client.handleLine(JSON.stringify({type:"message_delta",messageId:"live",delta:"Reply"}))
-      client.handleLine(JSON.stringify({type:"message_done",messageId:"live",text:"Reply",segments:[{type:"md",text:"Reply"}]}))
+      client.handleDaemon(({type:"reasoning_delta",messageId:"live",delta:"Think"}))
+      client.handleDaemon(({type:"reasoning_delta",messageId:"live",delta:" more"}))
+      client.handleDaemon(({type:"message_delta",messageId:"live",delta:"Reply"}))
+      client.handleDaemon(({type:"message_done",messageId:"live",text:"Reply",segments:[{type:"md",text:"Reply"}]}))
       if (client.messages.get(2).reasoning !== "Think more" || client.messages.get(2).phase !== "done") throw Error("stream")
       console.log("QML_PASS"); Qt.quit()
     } catch(e) { console.log("QML_FAIL",String(e)); Qt.exit(1) }

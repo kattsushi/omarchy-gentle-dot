@@ -4,10 +4,15 @@ import Quickshell.Io
 
 // Owned once by Client, never by a per-monitor widget. The native notification
 // service supports libnotify's default action; each waiting sender is independent.
+// Notifications go through bridge/notify.mjs (D-Bus, like `notify-send --wait`) with their text
+// on stdin: reply excerpts and ask titles never appear in a command line other local accounts
+// could read (S22.2).
 Item {
   id: root
   required property var client
-  property string commandPath: "notify-send" // Replaced by a recorder in tests.
+  readonly property var defaultCommand: [client.nodePath || "node",
+    decodeURIComponent(String(Qt.resolvedUrl("bridge/notify.mjs")).replace(/^file:\/\//, ""))]
+  property var notifyCommand: defaultCommand // Replaced by a recorder in tests.
   // The Omarchy notification service plays no sound, so the plugin does.
   property string soundCommandPath: "pw-play" // Replaced by a recorder in tests.
   property string soundDir: "/usr/share/sounds/freedesktop/stereo/"
@@ -50,9 +55,9 @@ Item {
 
   function notify(kind, title, body, force) {
     if (!client.notificationsEnabled || (!force && client.panelVisible)) return false
-    var process = sender.createObject(root, { command: [commandPath,
-      "--app-name=Gentle Dot", "--action=default=Open", "--wait", "--expire-time=8000",
-      "--", plain(title), escaped(plain(body).slice(0, 140))] })
+    var process = sender.createObject(root, { command: notifyCommand, payload: JSON.stringify({
+      appName: "Gentle Dot", summary: plain(title), body: escaped(plain(body).slice(0, 140)),
+      actions: ["default", "Open"], expireMs: 8000 }) })
     if (!process) return false
     lastKind = kind
     process.running = true
@@ -119,14 +124,21 @@ Item {
   Component {
     id: sender
     Process {
+      // One JSON line on stdin, then stdin closes.
+      property string payload: ""
+      stdinEnabled: true
+      onStarted: {
+        write(payload + "\n")
+        payload = ""
+        stdinEnabled = false
+      }
       stdout: SplitParser {
         onRead: function(line) {
           if (line.trim() === "default") root.client.openChat()
           else root.commandOutput(line)
         }
       }
-      // notify-send --wait reports an expired notification on stderr; that is not an error.
-      stderr: SplitParser { onRead: function(line) { if (line.indexOf("Wait timeout expired") < 0) console.warn("Gentle Dot notification:", line) } }
+      stderr: SplitParser { onRead: function(line) { console.warn("Gentle Dot notification:", line) } }
       onExited: function(code) {
         if (code !== 0) console.warn("Gentle Dot notification command exited:", code)
         var process = this

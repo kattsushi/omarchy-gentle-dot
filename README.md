@@ -211,9 +211,11 @@ From a terminal: `node voice/setup.mjs status|enable`, `node voice/model.mjs sta
 ## Notifications
 
 Desktop notifications are on by default; turn them off in **Settings → Notifications**.
-They use `notify-send` with a default **Open** action, handled by Omarchy's native
-notification service (including its Do Not Disturb policy). Clicking opens the
-chat, or shows/unminimizes its existing detached window.
+They go to Omarchy's native notification service (including its Do Not Disturb policy) over
+D-Bus, with a default **Open** action: `bridge/notify.mjs` reads the text from stdin and calls
+`org.freedesktop.Notifications.Notify` on the session bus, so the reply excerpt or question
+title never appears in a command line (see [Security](#security)). Clicking opens the chat, or
+shows/unminimizes its existing detached window.
 
 Omarchy's notification service plays no sound, so the plugin plays a freedesktop
 system sound with `pw-play` (Settings → Notifications → **Notification sound**, on by
@@ -392,18 +394,28 @@ the daemon refuses, a lost connection) the draft and chips stay, ready to send a
 **Images in the chat.** Images you attached from this client show as low-quality previews
 (240 px) in your message; click one to open the image viewer: the original image scaled to
 fit, its size, **Copy image** (`wl-copy --type <mime> < file`), **Attach to message** (back into
-the composer) and × (or Escape, or a click outside) to close. Markdown images in replies render
-only for `https://` URLs (fetched without any credentials) and local files; other schemes keep
-only their alt text, and raw `<img>` tags are dropped.
+the composer) and × (or Escape, or a click outside) to close. Markdown images in replies are
+only `https://` images, and they wait for a click: a **Load image from <host>** placeholder (the
+host masked while connection details are hidden), then the image, fetched without any
+credentials and remembered for the session. Local paths, `file://` and other schemes keep only
+their alt text, raw `<img>` tags are dropped and any other HTML shows as text
+(see [Security](#security)).
 
 **Files from history and other clients** need a daemon with attachment download
 (see [Requires Gentle Dot](#requires-gentle-dot)), which names each file's upload folder (`uploadId`) and serves it at
 `GET /upload/<uploadId>/<name>`. With it:
 
 - PNG, JPEG, GIF and WebP images are downloaded once per session for their thumbnail
-  ("loading preview…" meanwhile), then show and open in the viewer like your own images.
+  ("loading preview…" meanwhile), then show and open in the viewer like your own images. A
+  history load fetches at most 20 previews, the newest; older ones say "preview not loaded"
+  and load with their 󰋩 icon.
 - Other files (PDFs, text, archives…) are never downloaded on their own: their chip has an
-  **Open** icon (󰏌) that downloads the file and opens it with `xdg-open`.
+  **Open** icon (󰏌) that downloads the file and opens it with `xdg-open` when it is an image, a
+  PDF or plain text (`.txt`, `.log`, `.md`, `.csv`, `.json`) whose bytes match its name. Anything
+  else (a `.desktop` file, a script, an archive…) is left in the cache: the panel says where it
+  was saved and the chip gets a **Copy path** icon (󰆏).
+- The cache (`$XDG_RUNTIME_DIR/omarchy-gentle-dot/cache`) holds at most 200 MB: after each
+  download the least recently used copies are removed (never the one being shown).
 - A failed download keeps the chip with a short reason, for example "preview unavailable ·
   not found" (also: token rejected, too large, download failed, not supported). Network
   failures are retried after the next reconnect.
@@ -615,6 +627,45 @@ $Q avatarSleep true                         # testing: asleep now (false wakes i
 $Q statusLabel                              # the composer's status label: {text, tone}
 ```
 
+## Security
+
+The panel treats the daemon (local or remote) as a chat peer, not as part of the plugin: what it
+sends is shown, never trusted to touch this computer.
+
+**Two channels, one pipe.** The bridge writes every line as an envelope,
+`{"from":"daemon","msg":…}` for daemon frames (whatever their `type`) and
+`{"from":"bridge","msg":…}` for its own state and results. `Client.qml` handles the two apart: a
+daemon frame can never act as a bridge state or as a local result (`files_inspected`,
+`upload_*`, `attachment_*`). A local result is taken only when it answers a request the panel made
+(unguessable request id, still waiting) and names what was asked: inspected paths among the paths
+asked about, the upload's exact files, a fetched file's id and name and its path in the bridge's
+private cache (`$XDG_RUNTIME_DIR/omarchy-gentle-dot/cache`, checked with `realpath`). Anything else
+is dropped and logged without its content.
+
+**What a daemon can do:** send chat text, questions, activities, toasts and errors; name files in
+its own upload store, which the bridge downloads (with the token) into that private cache.
+**What it cannot do:** attach, upload, show, copy or open a local file it names; change the
+connection state; make the panel load any image on its own. Every `![` and `<` in Markdown from the
+daemon (replies, questions, in prose and in code alike, whole or cut by **Show more**) gets an
+invisible word joiner (U+2060) after it, so Qt's Markdown renderer never sees image syntax or HTML;
+`https://` images become a click-to-load placeholder; links in questions open only for
+`http(s)://`. The viewer, Open, Copy image and Attach act only on files you attached, files this
+panel uploaded, and the bridge's cached copies; **Open** runs only for images, PDFs and plain text
+whose sniffed type matches their name. The download cache is capped (200 MB) and a history load
+fetches at most 20 previews.
+
+**Nothing private in command lines.** Other local accounts can read every process's arguments
+(`ps`). Notification text goes to `bridge/notify.mjs` on stdin, then over D-Bus; the daemon URL and
+token file (named after the host) go to the bridge on stdin (`--config-stdin`); the `/health` check
+gives curl its URL with `-K -`; token, token paths and image paths go to their helper scripts on
+stdin. The one exception is **Open** on an attachment, on your click: `xdg-open` and the
+application it starts need the file's path (in the private cache, or a file you attached) as an
+argument.
+
+**Reporting.** Please report a security problem privately: **Security → Report a vulnerability**
+on [the repository](https://github.com/kattsushi/omarchy-gentle-dot/security), or, if that is not
+available, open an issue that only asks for a private contact (no details).
+
 ## Limits
 
 - Signing in to model providers and connectors is not in the panel yet: use the Gentle Dot app or its web UI (`http://127.0.0.1:4317` on the daemon's machine).
@@ -632,7 +683,8 @@ The tests never talk to a real daemon and never send desktop input. After editin
 QML, run `omarchy-restart-shell`: `rescanPlugins` keeps the old QML types, and a symlinked
 checkout does not trigger the shell's auto-reload.
 
-- `bridge/bridge.mjs`: WebSocket (protocol v1) ↔ newline-delimited JSON on stdio; says hello with the token, reconnects with backoff, stops on a rejected token or protocol; uploads attachments and downloads stored ones into the private cache.
+- `bridge/bridge.mjs`: WebSocket (protocol v1) ↔ newline-delimited JSON on stdio, every stdout line in a `{"from":"daemon"|"bridge","msg"}` envelope; reads its URL and token file from stdin; says hello with the token, reconnects with backoff, stops on a rejected token or protocol; uploads attachments and downloads stored ones into the private cache.
+- `bridge/notify.mjs`, `bridge/dbus.mjs`: one desktop notification over the session bus (a small D-Bus client: SASL EXTERNAL, Notify, ActionInvoked/NotificationClosed), its text read from stdin; tested against a private `dbus-daemon`.
 - `bridge/render.mjs`, `bridge/highlighter.mjs`: splits replies into Markdown and code and highlights the code with the bundled highlight.js (`third_party/highlight.js`, no `node_modules` needed).
 - `bridge/activity-view.mjs`: turns an activity's argument/result previews into a per-tool view (code, terminal output, result list, fields, path), tolerant of cut JSON; rendered by `ActivityDetail.qml`.
 - `Client.qml`: the plugin service: one bridge, the conversation model, pending questions, settings persistence, IPC.
@@ -642,7 +694,7 @@ checkout does not trigger the shell's auto-reload.
 - `Avatar.qml`, `avatar/mood.mjs`: the composer's avatar; `mood.mjs` holds the state machine (chat state to mood, mood to expression), the eye, pupil and moustache geometry and the moustache gestures (which one per mood or reaction, and their keyframes), unit-tested with node:test.
 - `status.mjs`: the composer's status label (connection, questions, voice, uploads, running activity and agent phase to a few words and a tone), unit-tested with node:test.
 - `voice/runtime.mjs`, `voice/setup.mjs`, `voice/model.mjs`, `voice/transcriber.mjs`, `Voice.qml`: the optional speech runtime (installed with npm outside the plugin folder), Enable voice, the speech model and on-device transcription.
-- `Notifier.qml`: service-owned notification policy and independent libnotify senders. Tests inject a fake command; no desktop notifications or live-daemon sends.
+- `Notifier.qml`: service-owned notification policy and independent senders (`bridge/notify.mjs`). Tests inject a fake command; no desktop notifications or live-daemon sends.
 
 ## License
 

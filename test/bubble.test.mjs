@@ -132,25 +132,25 @@ test('client stamps live messages on arrival, keeps daemon times and never inven
   Plugin.Client { id: client; entrySettings: ({notifications:false}) }
   ${checks(`
     var before = Date.now()
-    client.handleLine(JSON.stringify({type:"history",messages:[{id:"h1",role:"user",text:"old"},{id:"h2",role:"assistant",text:"timed",at:"2026-10-20T10:00:00.000Z"}]}))
+    client.handleDaemon(({type:"history",messages:[{id:"h1",role:"user",text:"old"},{id:"h2",role:"assistant",text:"timed",at:"2026-10-20T10:00:00.000Z"}]}))
     if (client.messages.get(0).at !== 0) throw Error("history time invented")
     if (client.messages.get(1).at !== Date.parse("2026-10-20T10:00:00.000Z")) throw Error("history at")
-    client.handleLine(JSON.stringify({type:"user_message",messageId:"u",text:"hi"}))
+    client.handleDaemon(({type:"user_message",messageId:"u",text:"hi"}))
     var u = client.messages.get(2).at
     if (u < before || u > Date.now()) throw Error("user receipt time")
-    client.handleLine(JSON.stringify({type:"activity",messageId:"r",activity:{id:"x",kind:"read",title:"Read",status:"running"}}))
+    client.handleDaemon(({type:"activity",messageId:"r",activity:{id:"x",kind:"read",title:"Read",status:"running"}}))
     if (client.messages.get(3).at !== 0) throw Error("activity stamped")
-    client.handleLine(JSON.stringify({type:"message_delta",messageId:"r",delta:"Hel"}))
+    client.handleDaemon(({type:"message_delta",messageId:"r",delta:"Hel"}))
     var first = client.messages.get(3).at
     if (first < before) throw Error("first delta not stamped")
     var later = Date.now() + 20
     until(function() { return Date.now() >= later })
-    client.handleLine(JSON.stringify({type:"message_delta",messageId:"r",delta:"lo"}))
-    client.handleLine(JSON.stringify({type:"message_done",messageId:"r",text:"Hello"}))
+    client.handleDaemon(({type:"message_delta",messageId:"r",delta:"lo"}))
+    client.handleDaemon(({type:"message_done",messageId:"r",text:"Hello"}))
     if (client.messages.get(3).at !== first) throw Error("restamped")
-    client.handleLine(JSON.stringify({type:"message_done",messageId:"d",text:"Done",at:1793137664830}))
+    client.handleDaemon(({type:"message_done",messageId:"d",text:"Done",at:1793137664830}))
     if (client.messages.get(4).at !== 1793137664830) throw Error("done at")
-    client.handleLine(JSON.stringify({type:"user_message",messageId:"u2",text:"x",at:1793137000000}))
+    client.handleDaemon(({type:"user_message",messageId:"u2",text:"x",at:1793137000000}))
     if (client.messages.get(5).at !== 1793137000000) throw Error("user at")
     if (!(client.now > 0) || client.clockInterval !== 60000) throw Error("shared clock")
   `)}

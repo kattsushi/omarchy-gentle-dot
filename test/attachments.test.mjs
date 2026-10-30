@@ -4,7 +4,7 @@ import { crc32, deflateSync } from 'node:zlib';
 import { poll, qml } from './composer-harness.test.mjs';
 import {
   ATTACHMENT_LIMITS, addWithinLimits, allowedImageUrl, autoFetched, downloadUrl, fileUrl, formatSize, isImage, localPathOf,
-  markdownParts, mimeFor, uploadEndpoint, validStoredName, validUploadId,
+  inertMarkdown, markdownParts, markdownText, mimeFor, safeToOpen, uploadEndpoint, validStoredName, validUploadId,
 } from '../bridge/attachments.mjs';
 
 // A real width x height PNG, so Qt can decode thumbnails in the headless harness.
@@ -71,17 +71,43 @@ test('stored attachments: upload ids, names, download URLs, auto-fetched types a
   assert.equal(fileUrl('/run/user/1000/omarchy-gentle-dot/cache/u_x/a #1?.png'), 'file:///run/user/1000/omarchy-gentle-dot/cache/u_x/a%20%231%3F.png');
 });
 
-test('Markdown images: https and local files become image parts, other schemes and raw <img> only keep their alt text', () => {
+// S22.1: Markdown comes from the daemon, so a local path or file:// image would let it show (and
+// offer to copy or attach) any local file: only https images load.
+test('Markdown images: only https becomes an image part; local files, other schemes and raw <img> keep their alt text', () => {
   assert.equal(allowedImageUrl('https://example.com/a.png'), 'https://example.com/a.png');
-  assert.equal(allowedImageUrl('/home/me/a b.png'), 'file:///home/me/a%20b.png');
-  for (const bad of ['http://example.com/a.png', 'data:image/png;base64,AAAA', 'javascript:x', 'ftp://h/a.png', 'a.png']) assert.equal(allowedImageUrl(bad), '', bad);
-  assert.deepEqual(markdownParts('See ![chart](https://example.com/c.png "Title") and ![pixel](http://tracker/p.gif).\n<img src="http://x/y.png"> `![code](/kept)` ![shot](/tmp/s.png)'), [
+  for (const bad of ['/home/me/a b.png', 'file:///home/me/a.png', 'file://localhost/etc/x.png', 'http://example.com/a.png',
+    'data:image/png;base64,AAAA', 'javascript:x', 'ftp://h/a.png', 'a.png']) assert.equal(allowedImageUrl(bad), '', bad);
+  assert.deepEqual(markdownParts('See ![chart](https://example.com/c.png "Title") and ![pixel](http://tracker/p.gif).\n<img src="http://x/y.png"> `![code](/kept)` ![shot](/tmp/s.png) ![key](file:///home/me/.ssh/id.png)'), [
     { type: 'md', text: 'See ' },
     { type: 'image', url: 'https://example.com/c.png', alt: 'chart' },
-    { type: 'md', text: ' and pixel.\n `![code](/kept)` ' },
-    { type: 'image', url: 'file:///tmp/s.png', alt: 'shot' },
+    { type: 'md', text: ' and pixel.\n `!\u2060[code](/kept)` shot key' },
   ]);
   assert.deepEqual(markdownParts('No images here'), [{ type: 'md', text: 'No images here' }]);
+});
+
+// Qt's Markdown renderer also loads images from raw HTML (<img>, background attributes, CSS) and
+// reference-style images: none of that may reach it from daemon text. A WORD JOINER after every "<"
+// and "![" makes them inert in prose and code alike; the visible text is unchanged.
+test('Markdown prose: HTML and leftover image syntax are made inert, whatever the trick; the visible text is unchanged', () => {
+  const W = '\u2060';
+  const md = (text) => markdownParts(text).map((part) => part.type === 'md' ? part.text : `[image ${part.url}]`).join('');
+  assert.equal(md('a < b, use `Vec<T>` and ``a`b`` here'), `a <${W} b, use \`Vec<${W}T>\` and \`\`a\`b\`\` here`);
+  assert.equal(md('<im<img>g src="/etc/x.png">'), `<${W}img src="/etc/x.png">`);
+  assert.equal(md('<table background="/etc/x.png"><tr><td>x</td></tr></table>'),
+    `<${W}table background="/etc/x.png"><${W}tr><${W}td>x<${W}/td><${W}/tr><${W}/table>`);
+  assert.equal(md('<p style="background-image: url(/etc/x.png)">x</p>'), `<${W}p style="background-image: url(/etc/x.png)">x<${W}/p>`);
+  assert.equal(md('![ref][x]\n\n[x]: /etc/x.png'), `!${W}[ref][x]\n\n[x]: /etc/x.png`);
+  // Inside what looks like inline code too.
+  assert.equal(md('`<img src=/etc/x.png>` and `![k](/etc/x.png)`'), `\`<${W}img src=/etc/x.png>\` and \`!${W}[k](/etc/x.png)\``);
+  assert.equal(md('fine ![k](https://h.example/a.png) <b>'), `fine [image https://h.example/a.png] <${W}b>`);
+  assert.equal(markdownText('Approve ![shot](/etc/x.png) <b>now</b>?'), `Approve shot <${W}b>now<${W}/b>?`);
+  // Idempotent, and nothing but the joiners is added.
+  for (const text of ['a <b> ![x](/y) `c`', '<<!!![[', '']) {
+    assert.equal(inertMarkdown(inertMarkdown(text)), inertMarkdown(text));
+    assert.equal(inertMarkdown(text).replaceAll(W, ''), text);
+  }
+  // An https image inside a span md4c does not read as code (it spans lines) is extracted, not sheltered.
+  assert.deepEqual(markdownParts('`a\n![k](https://h.example/a.png) b`').map((part) => part.type), ['md', 'image', 'md']);
 });
 
 const find = `
@@ -116,7 +142,7 @@ test('composer: attach icon left of the mic, chips with thumbnail/size/remove, a
         client.addAttachmentPaths([shot, "file://" + encodeURI(file("my notes.txt"))])
         var inspect = client.sent[0]
         if (inspect.type !== "inspect_files" || inspect.paths[0] !== shot || inspect.paths[1] !== file("my notes.txt")) throw Error("inspect " + JSON.stringify(inspect))
-        client.handleLine(JSON.stringify({type:"files_inspected", requestId: inspect.requestId, files:[
+        client.handleBridge(({type:"files_inspected", requestId: inspect.requestId, files:[
           {path: shot, name: "shot.png", size: 1572864, mime: "image/png"}, {path: file("my notes.txt"), name: "my notes.txt", size: 5, mime: "text/plain"}]}))
         if (client.attachments.length !== 2) throw Error("not attached")
         // Chips are laid out and the thumbnail decodes asynchronously.
@@ -130,7 +156,9 @@ test('composer: attach icon left of the mic, chips with thumbnail/size/remove, a
         })
         if (find(chips[1], "chipThumb").length) throw Error("thumbnail for text")
         if (find(chips[0], "chipName")[0].text !== "shot.png" || find(chips[0], "chipSize")[0].text !== "1.5 MB") throw Error("chip text")
-        client.handleLine(JSON.stringify({type:"files_inspected", requestId:"x", files:[{path:"/big", name:"big.iso", size: 30 * 1048576, mime:"x"}]}))
+        client.addAttachmentPaths(["/big"])
+        var big = client.sent[client.sent.length - 1]
+        client.handleBridge(({type:"files_inspected", requestId: big.requestId, files:[{path:"/big", name:"big.iso", size: 30 * 1048576, mime:"x"}]}))
         if (client.notice !== "big.iso is too large: up to 25 MB per file." || client.noticeLevel !== "error") throw Error("limit notice " + client.notice)
         if (client.attachments.length !== 2) throw Error("refused file kept")
         find(chips[1], "chipRemove")[0].clicked()
@@ -166,20 +194,20 @@ test('sending with files uploads first, keeps the draft until upload_done, and m
         if (client.draft !== "look" || client.attachments.length !== 2 || !client.uploading) throw Error("cleared too early")
         keyClick(Qt.Key_Return)
         if (client.sent.length !== 1) throw Error("sent twice")
-        client.handleLine(JSON.stringify({type:"upload_progress", requestId: upload.requestId, index: 1, count: 2, name: "n.txt", loaded: 2, total: 4}))
+        client.handleBridge(({type:"upload_progress", requestId: upload.requestId, index: 1, count: 2, name: "n.txt", loaded: 2, total: 4}))
         if (client.uploadStatus !== "Uploading n.txt (2/2) · 50%") throw Error("status " + client.uploadStatus)
-        client.handleLine(JSON.stringify({type:"upload_error", requestId: upload.requestId, code:"unauthorized", status: 401, message:"Could not upload n.txt: The access key is not valid."}))
+        client.handleBridge(({type:"upload_error", requestId: upload.requestId, code:"unauthorized", status: 401, message:"Could not upload n.txt: The access key is not valid."}))
         if (client.uploading || client.notice !== "Could not upload n.txt: The access key is not valid." || client.draft !== "look" || client.attachments.length !== 2) throw Error("error handling")
         keyClick(Qt.Key_Return)
         var retry = client.sent[1]
-        client.handleLine(JSON.stringify({type:"upload_done", requestId: retry.requestId, files:[
+        client.handleBridge(({type:"upload_done", requestId: retry.requestId, files:[
           {path: shot, uploadId:"u_abcdefgh12", name:"shot.png", size:120, mime:"image/png"}, {path:"/tmp/n.txt", uploadId:"u_abcdefgh12", name:"n.txt", size:5, mime:"text/plain"}]}))
         if (client.uploading || client.draft !== "" || client.attachments.length !== 0 || client.uploadStatus !== "") throw Error("not cleared after upload_done")
         if (client.localFiles["u_abcdefgh12/shot.png"] !== shot) throw Error("upload map")
-        client.handleLine(JSON.stringify({type:"user_message", messageId:"m1", text:"look", attachments:[{name:"shot.png", size:120, mime:"image/png"}, {name:"n.txt", size:5, mime:"text/plain"}]}))
+        client.handleDaemon(({type:"user_message", messageId:"m1", text:"look", attachments:[{name:"shot.png", size:120, mime:"image/png"}, {name:"n.txt", size:5, mime:"text/plain"}]}))
         var row = JSON.parse(client.messages.get(0).attachments)
         if (row[0].path !== shot || row[1].path !== "/tmp/n.txt") throw Error("user_message paths " + JSON.stringify(row))
-        client.handleLine(JSON.stringify({type:"history", messages:[{id:"m1", role:"user", text:"look", attachments:[{name:"shot.png", size:120, mime:"image/png"}]}, {id:"h", role:"user", text:"", attachments:[{name:"other.png", size:9, mime:"image/png"}]}]}))
+        client.handleDaemon(({type:"history", messages:[{id:"m1", role:"user", text:"look", attachments:[{name:"shot.png", size:120, mime:"image/png"}]}, {id:"h", role:"user", text:"", attachments:[{name:"other.png", size:9, mime:"image/png"}]}]}))
         if (JSON.parse(client.messages.get(0).attachments)[0].path !== shot || JSON.parse(client.messages.get(1).attachments)[0].path !== undefined) throw Error("history paths")
         client.attachments = [{path: shot, name: "shot.png", size: 120, mime: "image/png"}]
         client.draft = ""
@@ -239,7 +267,7 @@ test('Ctrl+V attaches a clipboard image as a private temp file, and pastes text 
 
 test('chat: own image attachments show low-quality thumbnails that open the viewer; others show chips, never broken images', async t => {
   await qml(t, `
-  Plugin.Client { id: client; entrySettings: ({notifications:false}) }
+  Plugin.Client { id: client; entrySettings: ({notifications:false}); property var sent: []; function send(obj) { sent = sent.concat([obj]); return true } }
   FloatingWindow {
     visible: true; width: 600; height: 900
     Plugin.ChatView { id: chat; width: 600; height: 500; client: client; model: client.messages }
@@ -254,8 +282,11 @@ test('chat: own image attachments show low-quality thumbnails that open the view
     ${poll}
     function run() {
       try {
-        client.handleLine(JSON.stringify({type:"upload_done", requestId:"r", files:[{path: shot, uploadId:"u_abcdefgh12", name:"shot.png", size:120, mime:"image/png"}]}))
-        client.handleLine(JSON.stringify({type:"history", messages:[{id:"m", role:"user", text:"", attachments:[
+        client.connection = "open"; client.ready = true
+        client.attachments = [{path: shot, name:"shot.png", size:120, mime:"image/png"}]
+        client.submitDraft()
+        client.handleBridge(({type:"upload_done", requestId: client.sent[0].requestId, files:[{path: shot, uploadId:"u_abcdefgh12", name:"shot.png", size:120, mime:"image/png"}]}))
+        client.handleDaemon(({type:"history", messages:[{id:"m", role:"user", text:"", attachments:[
           {name:"shot.png", size:120, mime:"image/png"}, {name:"from-mac.png", size:2048, mime:"image/png"}, {name:"notes.txt", size:5, mime:"text/plain"}]}]}))
         // The list lays out its delegates and the thumbnails decode asynchronously.
         var thumbs = [], chips = []
@@ -266,8 +297,8 @@ test('chat: own image attachments show low-quality thumbnails that open the view
           if (image.status !== Image.Ready || image.sourceSize.width !== 240 || !image.asynchronous || !image.cache) throw Error("thumbnail image " + image.sourceSize.width)
           chips = find(chat, "attachmentChip")
           if (chips.length !== 2) throw Error("chips " + chips.length)
-          var images = find(reply, "markdownImage")
-          if (images.length !== 1 || images[0].status !== Image.Ready) throw Error("markdown images " + images.length)
+          // A local Markdown image is daemon text naming a local file: only its alt text (S22.1).
+          if (find(reply, "markdownImage").length !== 0) throw Error("local markdown image loaded")
         })
         if (find(chips[0], "chipNote")[0].text !== "preview unavailable") throw Error("no preview note")
         if (find(chips[1], "chipNote").length !== 0) throw Error("note on a text file")
@@ -275,7 +306,7 @@ test('chat: own image attachments show low-quality thumbnails that open the view
         find(thumbs[0], "attachmentThumbHit")[0].clicked(null)
         if (!client.viewerImage || client.viewerImage.path !== shot || client.viewerImage.mime !== "image/png") throw Error("viewer " + JSON.stringify(client.viewerImage))
         var prose = find(reply, "proseText").map(function(item) { return item.text }).join("|")
-        if (/!\\[|tracker/.test(prose) || !/pixel/.test(prose)) throw Error("prose " + prose)
+        if (/!\\[|tracker|shot\\.png/.test(prose) || !/pixel/.test(prose) || !/local/.test(prose)) throw Error("prose " + prose)
         console.log("QML_PASS"); Qt.quit()
       } catch(e) { console.log("QML_FAIL", String(e)); Qt.exit(1) }
     }
@@ -302,6 +333,8 @@ test('image viewer: original resolution scaled to fit, copy image with its type,
     ${poll}
     function run() {
       try {
+        // A file the panel knows: one waiting in the composer.
+        client.attachments = [{path: shot, name: "shot.png", size: 120, mime: "image/png"}]
         client.openImage({path: shot, name: "shot.png", mime: "image/png"})
         settle(function() {
           var image = find(viewer, "viewerImage")[0]
@@ -315,7 +348,10 @@ test('image viewer: original resolution scaled to fit, copy image with its type,
         find(viewer, "viewerAttach")[0].clicked()
         if (client.sent[0].type !== "inspect_files" || client.sent[0].paths[0] !== shot) throw Error("attach back")
         if (client.viewerImage !== null) throw Error("viewer stayed open after attach")
-        client.openImage({url: "file://" + shot, name: "remote", mime: ""})
+        client.openImage({url: "file://" + shot, name: "local URL", mime: ""})
+        if (client.viewerImage !== null) throw Error("viewer opened a file URL")
+        client.openImage({url: "https://example.invalid/remote.png", name: "remote", mime: ""})
+        if (!client.viewerImage || client.viewerImage.path !== "") throw Error("https image " + JSON.stringify(client.viewerImage))
         if (find(viewer, "viewerCopy").length || find(viewer, "viewerAttach").length) throw Error("actions on a remote image")
         viewer.forceActiveFocus()
         keyClick(Qt.Key_Escape)
@@ -407,7 +443,7 @@ test('drag and drop: highlight while dragging, local files attach, other URLs on
         var inspect = client.sent[0]
         if (client.sent.length !== 1 || inspect.type !== "inspect_files" || inspect.paths.join("|") !== shot + "|" + notes) throw Error("inspect " + JSON.stringify(client.sent))
         if (client.notice !== "") throw Error("notice for local files " + client.notice)
-        client.handleLine(JSON.stringify({type:"files_inspected", requestId: inspect.requestId, files:[
+        client.handleBridge(({type:"files_inspected", requestId: inspect.requestId, files:[
           {path: shot, name: "shot.png", size: 120, mime: "image/png"}, {path: notes, name: "my notes.txt", size: 5, mime: "text/plain"}]}))
         if (find(composer, "attachmentChip").length !== 2) throw Error("chips " + find(composer, "attachmentChip").length)
 
@@ -449,4 +485,36 @@ test('drag and drop: highlight while dragging, local files attach, other URLs on
   }
   Timer { interval: 150; running: true; onTriggered: checks.run() }
   `, {files: {'shot.png': png()}});
+});
+
+test('S22.1: code spans md4c will not see (blank line, any newline) never shelter images or HTML', () => {
+  const inputs = ['`\n\n![x](file:///tmp/s.png)\n\n`', '`\n\n![x](/tmp/s.png)\n\n`', 'a `x\n\n![x](/tmp/s.png)\n\ny` b',
+    '`![x](/tmp/s.png)\n`', '`\n\n<img src="file:///tmp/s.png">\n\n`',
+    // Pieces joined back together must not recreate "![" at their boundary.
+    '![!](x)[y](/tmp/s.png)', '!![[z](x)](/tmp/s.png)', '!![[z](https://h.example/a.png)](/tmp/s.png)'];
+  for (const input of inputs) {
+    for (const part of markdownParts(input)) {
+      if (part.type !== 'md') continue;
+      assert.doesNotMatch(part.text, /!\[/, JSON.stringify(input));
+      assert.doesNotMatch(part.text, /<img/i, JSON.stringify(input));
+    }
+    assert.doesNotMatch(markdownText(input), /!\[|<img/i, JSON.stringify(input));
+  }
+});
+
+// md4c splits a GFM table row at its pipes before it looks for code spans, so a backtick pair
+// across cells is no code span there.
+test('S22.1: a backtick pair across GFM table cells never shelters an image', () => {
+  const table = '| a | b | c |\n| - | - | - |\n| `x | ![i](/tmp/s.png) | y` |';
+  for (const part of markdownParts(table)) if (part.type === 'md') assert.doesNotMatch(part.text, /!\[|<img/i);
+  assert.doesNotMatch(markdownText(table), /!\[|<img/i);
+  assert.doesNotMatch(markdownText('| `x | <img src="/tmp/s.png"> | y` |'), /<img/i);
+});
+
+test('safeToOpen: images, PDFs and plain text whose sniffed type matches their name; nothing else', () => {
+  for (const [path, mime] of [['/c/a.png', 'image/png'], ['/c/a.JPG', 'image/jpeg'], ['/c/r.pdf', 'application/pdf'],
+    ['/c/n.txt', 'text/plain'], ['/c/n.md', 'text/markdown'], ['/c/d.csv', 'text/csv'], ['/c/d.json', 'application/json']]) assert.equal(safeToOpen(path, mime), true, path);
+  for (const [path, mime] of [['/c/x.desktop', 'application/octet-stream'], ['/c/x.desktop', 'text/plain'], ['/c/run.sh', 'text/plain'],
+    ['/c/a.png', 'application/octet-stream'], ['/c/r.pdf', 'text/plain'], ['/c/page.html', 'text/html'], ['/c/i.svg', 'image/svg+xml'],
+    ['/c/noext', 'text/plain'], ['/c/a.png', ''], ['', 'image/png'], ['/c/a.png.desktop', 'image/png']]) assert.equal(safeToOpen(path, mime), false, path);
 });
